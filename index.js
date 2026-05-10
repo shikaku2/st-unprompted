@@ -59,7 +59,7 @@ const DEFAULT_SETTINGS = {
 };
 
 let checkTimer = null;
-let isGenerating = false;
+let unpromptedInFlight = false;
 let pendingNotification = null;
 
 function getSettings() {
@@ -224,7 +224,7 @@ function pickPrompt() {
 
 function canSendNow({ manual = false } = {}) {
     const s = getSettings();
-    if (isGenerating) return { ok: false, reason: 'generation already running' };
+    if (unpromptedInFlight) return { ok: false, reason: 'unprompted generation already running' };
     if (!manual && !s.enabled) return { ok: false, reason: 'disabled' };
 
     const ctx = getContext();
@@ -275,6 +275,7 @@ async function trySendUnprompted(manual = false) {
     saveSettingsDebounced();
     updateStatus(`Sending: ${selected.label}`);
 
+    unpromptedInFlight = true;
     try {
         pendingNotification = {
             chatKey: allowed.chatKey,
@@ -295,6 +296,8 @@ async function trySendUnprompted(manual = false) {
         updateStatus('Generation failed. Check console.');
         if (manual) toastr.error('Generation failed. Check console.', DISPLAY_NAME);
         return false;
+    } finally {
+        unpromptedInFlight = false;
     }
 }
 
@@ -588,10 +591,8 @@ jQuery(async () => {
     loadSettings();
     addSettingsUI();
 
-    eventSource.on(event_types.GENERATION_STARTED, () => { isGenerating = true; });
-    eventSource.on(event_types.GENERATION_ENDED, () => { isGenerating = false; });
     eventSource.on(event_types.GENERATION_STOPPED, () => {
-        isGenerating = false;
+        unpromptedInFlight = false;
         pendingNotification = null;
     });
     eventSource.on(event_types.MESSAGE_RECEIVED, maybeNotifyUnpromptedMessage);
