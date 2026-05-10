@@ -1,7 +1,7 @@
 {
     "display_name": "Unprompted Messages",
     "version": "0.1.2",
-    "author": "aaron",
+    "author": "Shikaku2",
     "js": "index.js",
     "css": "style.css",
     "loading_order": 10,
