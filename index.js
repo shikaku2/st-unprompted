@@ -50,7 +50,7 @@ const DEFAULT_PROMPTS = [
 const DEFAULT_SETTINGS = {
     enabled: false,
     checkMinutes: 30,
-    cooldownHours: 3,
+    cooldownMinutes: 180,
     maxAiInRow: 2,
     runOnChatOpen: false,
     browserNotifications: false,
@@ -73,6 +73,8 @@ function clone(value) {
 function loadSettings() {
     const existing = extension_settings[EXT_NAME] || {};
     const merged = Object.assign(clone(DEFAULT_SETTINGS), existing);
+    merged.cooldownMinutes = normalizeCooldownMinutes(existing);
+    delete merged.cooldownHours;
     merged.prompts = Array.isArray(existing.prompts) && existing.prompts.length
         ? existing.prompts.map(normalizePrompt)
         : clone(DEFAULT_PROMPTS);
@@ -80,6 +82,16 @@ function loadSettings() {
         ? existing.stateByChat
         : {};
     extension_settings[EXT_NAME] = merged;
+}
+
+function normalizeCooldownMinutes(settings) {
+    if (settings && Object.prototype.hasOwnProperty.call(settings, 'cooldownMinutes')) {
+        return positiveNumber(settings.cooldownMinutes, DEFAULT_SETTINGS.cooldownMinutes);
+    }
+    if (settings && Object.prototype.hasOwnProperty.call(settings, 'cooldownHours')) {
+        return positiveNumber(settings.cooldownHours, DEFAULT_SETTINGS.cooldownMinutes / 60) * 60;
+    }
+    return DEFAULT_SETTINGS.cooldownMinutes;
 }
 
 function normalizePrompt(prompt) {
@@ -241,7 +253,7 @@ function canSendNow({ manual = false } = {}) {
     if (!chatKey) return { ok: false, reason: 'no chat key' };
 
     const state = getChatState(chatKey);
-    const cooldownMs = positiveNumber(s.cooldownHours, DEFAULT_SETTINGS.cooldownHours) * HOUR_MS;
+    const cooldownMs = positiveNumber(s.cooldownMinutes, DEFAULT_SETTINGS.cooldownMinutes) * MINUTE_MS;
     if (!manual && state.lastSentAt && Date.now() - state.lastSentAt < cooldownMs) {
         return { ok: false, reason: 'cooldown' };
     }
@@ -491,8 +503,8 @@ function addSettingsUI() {
                 </label>
                 <label>
                     <span>Cooldown</span>
-                    <input id="unprompted_cooldown_hours" class="text_pole" type="number" min="0.01" step="0.25" value="${escHtml(s.cooldownHours)}">
-                    <span>hours</span>
+                    <input id="unprompted_cooldown_minutes" class="text_pole" type="number" min="0.01" step="0.01" value="${escHtml(s.cooldownMinutes)}">
+                    <span>min</span>
                 </label>
                 <label>
                     <span>Max nonuser in row</span>
@@ -542,9 +554,9 @@ function addSettingsUI() {
         saveSettingsDebounced();
         restartTimer();
     });
-    $('#unprompted_cooldown_hours').on('change', function () {
-        getSettings().cooldownHours = positiveNumber(this.value, DEFAULT_SETTINGS.cooldownHours);
-        this.value = getSettings().cooldownHours;
+    $('#unprompted_cooldown_minutes').on('change', function () {
+        getSettings().cooldownMinutes = positiveNumber(this.value, DEFAULT_SETTINGS.cooldownMinutes);
+        this.value = getSettings().cooldownMinutes;
         saveSettingsDebounced();
     });
     $('#unprompted_max_ai').on('change', function () {

@@ -10,7 +10,7 @@ SillyTavern extension that lets the current character occasionally send an unpro
 ## Behavior
 
 - Checks every configured number of minutes. Default: 30.
-- Enforces a per-chat cooldown. Default: 3 hours.
+- Enforces a per-chat cooldown. Default: 180 minutes.
 - Refuses to send if there are already too many assistant messages in a row. Default: 2.
 - Picks one enabled prompt by relative weight. A prompt with weight 5 is selected with chance `5 / total enabled weight`.
 - Uses `Generate('normal', { automatic_trigger: true, quiet_prompt, quietToLoud: true })`, so the message is saved as a normal character reply.
