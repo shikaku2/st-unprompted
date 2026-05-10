@@ -1,0 +1,12 @@
+{
+    "display_name": "Unprompted Messages",
+    "version": "0.1.0",
+    "author": "aaron",
+    "js": "index.js",
+    "css": "style.css",
+    "loading_order": 10,
+    "auto_update": false,
+    "requires": [],
+    "minimum_client_version": "1.12.0",
+    "description": "Lets a character occasionally send weighted, configurable unprompted messages."
+}
