@@ -222,9 +222,10 @@ function pickPrompt() {
     return prompts[prompts.length - 1];
 }
 
-function canSendNow() {
+function canSendNow({ manual = false } = {}) {
     const s = getSettings();
-    if (!s.enabled || isGenerating) return { ok: false, reason: 'disabled or generating' };
+    if (isGenerating) return { ok: false, reason: 'generation already running' };
+    if (!manual && !s.enabled) return { ok: false, reason: 'disabled' };
 
     const ctx = getContext();
     if ((!ctx.chatId && !ctx.groupId) || !Array.isArray(ctx.chat) || !ctx.chat.length) {
@@ -241,7 +242,7 @@ function canSendNow() {
 
     const state = getChatState(chatKey);
     const cooldownMs = positiveNumber(s.cooldownHours, DEFAULT_SETTINGS.cooldownHours) * HOUR_MS;
-    if (state.lastSentAt && Date.now() - state.lastSentAt < cooldownMs) {
+    if (!manual && state.lastSentAt && Date.now() - state.lastSentAt < cooldownMs) {
         return { ok: false, reason: 'cooldown' };
     }
 
@@ -249,19 +250,24 @@ function canSendNow() {
 }
 
 async function trySendUnprompted(manual = false) {
-    const allowed = canSendNow();
+    const allowed = canSendNow({ manual });
     updateStatus(allowed.ok ? 'Rolling prompt...' : `Idle: ${allowed.reason}`);
-    if (!allowed.ok) return false;
+    if (!allowed.ok) {
+        if (manual) toastr.info(allowed.reason, DISPLAY_NAME);
+        return false;
+    }
 
     const selected = pickPrompt();
     if (!selected) {
         updateStatus('No enabled prompts.');
+        if (manual) toastr.warning('No enabled prompts.', DISPLAY_NAME);
         return false;
     }
 
     const quietPrompt = expandCustomMacros(selected.prompt);
     if (!quietPrompt) {
         updateStatus('Selected prompt expanded to empty text.');
+        if (manual) toastr.warning('Selected prompt expanded to empty text.', DISPLAY_NAME);
         return false;
     }
 
