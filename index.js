@@ -79,9 +79,6 @@ function loadSettings() {
     merged.stateByChat = existing.stateByChat && typeof existing.stateByChat === 'object'
         ? existing.stateByChat
         : {};
-    if (!canUseBrowserNotifications() || Notification.permission !== 'granted') {
-        merged.browserNotifications = false;
-    }
     extension_settings[EXT_NAME] = merged;
 }
 
@@ -351,11 +348,9 @@ function syncNotificationUI() {
     const canEnable = !unavailableReason;
 
     if (!canEnable) {
-        s.browserNotifications = false;
         checkbox.checked = false;
         checkbox.disabled = true;
         if (note) note.textContent = unavailableReason;
-        saveSettingsDebounced();
         return;
     }
 
@@ -378,7 +373,6 @@ async function requestBrowserNotificationSetting(enable) {
     }
 
     if (!canUseBrowserNotifications()) {
-        s.browserNotifications = false;
         syncNotificationUI();
         return;
     }
@@ -388,8 +382,10 @@ async function requestBrowserNotificationSetting(enable) {
         permission = await Notification.requestPermission();
     }
 
-    s.browserNotifications = permission === 'granted';
-    saveSettingsDebounced();
+    if (permission === 'granted') {
+        s.browserNotifications = true;
+        saveSettingsDebounced();
+    }
     syncNotificationUI();
 }
 
@@ -490,7 +486,7 @@ function addSettingsUI() {
                     <span>hours</span>
                 </label>
                 <label>
-                    <span>Max AI in row</span>
+                    <span>Max nonuser in row</span>
                     <input id="unprompted_max_ai" class="text_pole" type="number" min="1" step="1" value="${escHtml(s.maxAiInRow)}">
                 </label>
             </div>
