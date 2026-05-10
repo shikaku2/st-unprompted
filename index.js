@@ -53,12 +53,14 @@ const DEFAULT_SETTINGS = {
     cooldownHours: 3,
     maxAiInRow: 2,
     runOnChatOpen: false,
+    browserNotifications: false,
     prompts: DEFAULT_PROMPTS,
     stateByChat: {},
 };
 
 let checkTimer = null;
 let isGenerating = false;
+let pendingNotification = null;
 
 function getSettings() {
     return extension_settings[EXT_NAME];
@@ -77,6 +79,9 @@ function loadSettings() {
     merged.stateByChat = existing.stateByChat && typeof existing.stateByChat === 'object'
         ? existing.stateByChat
         : {};
+    if (!canUseBrowserNotifications() || Notification.permission !== 'granted') {
+        merged.browserNotifications = false;
+    }
     extension_settings[EXT_NAME] = merged;
 }
 
@@ -135,6 +140,11 @@ function parseMessageTime(message) {
 
 function cleanMessageText(text) {
     return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function previewText(text, limit = 100) {
+    const cleaned = cleanMessageText(text);
+    return cleaned.length > limit ? `${cleaned.slice(0, limit - 3)}...` : cleaned;
 }
 
 function formatMessage(message) {
@@ -263,6 +273,10 @@ async function trySendUnprompted(manual = false) {
     updateStatus(`Sending: ${selected.label}`);
 
     try {
+        pendingNotification = {
+            chatKey: allowed.chatKey,
+            startedAt: Date.now(),
+        };
         await Generate('normal', {
             automatic_trigger: true,
             quiet_prompt: quietPrompt,
@@ -273,6 +287,7 @@ async function trySendUnprompted(manual = false) {
         updateStatus(`Last sent: ${selected.label}`);
         return true;
     } catch (err) {
+        pendingNotification = null;
         console.error(`[${EXT_NAME}] Failed to generate unprompted message`, err);
         updateStatus('Generation failed. Check console.');
         if (manual) toastr.error('Generation failed. Check console.', DISPLAY_NAME);
@@ -314,6 +329,101 @@ function escHtml(value) {
 function updateStatus(text) {
     const el = document.getElementById('unprompted_status');
     if (el) el.textContent = text || '';
+}
+
+function canUseBrowserNotifications() {
+    return 'Notification' in window;
+}
+
+function getNotificationUnavailableReason() {
+    if (!canUseBrowserNotifications()) return 'Browser notifications are not supported.';
+    if (Notification.permission === 'denied') return 'Browser notifications are blocked for this site.';
+    return '';
+}
+
+function syncNotificationUI() {
+    const checkbox = document.getElementById('unprompted_browser_notifications');
+    const note = document.getElementById('unprompted_notification_note');
+    if (!checkbox) return;
+
+    const s = getSettings();
+    const unavailableReason = getNotificationUnavailableReason();
+    const canEnable = !unavailableReason;
+
+    if (!canEnable) {
+        s.browserNotifications = false;
+        checkbox.checked = false;
+        checkbox.disabled = true;
+        if (note) note.textContent = unavailableReason;
+        saveSettingsDebounced();
+        return;
+    }
+
+    checkbox.disabled = false;
+    checkbox.checked = !!s.browserNotifications && Notification.permission === 'granted';
+    if (note) {
+        note.textContent = Notification.permission === 'granted'
+            ? 'Browser notifications are enabled for this site.'
+            : 'Checking this will ask the browser for notification permission.';
+    }
+}
+
+async function requestBrowserNotificationSetting(enable) {
+    const s = getSettings();
+    if (!enable) {
+        s.browserNotifications = false;
+        saveSettingsDebounced();
+        syncNotificationUI();
+        return;
+    }
+
+    if (!canUseBrowserNotifications()) {
+        s.browserNotifications = false;
+        syncNotificationUI();
+        return;
+    }
+
+    let permission = Notification.permission;
+    if (permission === 'default') {
+        permission = await Notification.requestPermission();
+    }
+
+    s.browserNotifications = permission === 'granted';
+    saveSettingsDebounced();
+    syncNotificationUI();
+}
+
+function showBrowserNotification(message) {
+    const s = getSettings();
+    if (!s.browserNotifications || !canUseBrowserNotifications() || Notification.permission !== 'granted') {
+        syncNotificationUI();
+        return;
+    }
+
+    const name = message?.name || 'AI';
+    const preview = previewText(message?.mes || '');
+    if (!preview) return;
+
+    const notification = new Notification(`${name}: ${preview}`, {
+        tag: `${EXT_NAME}-${Date.now()}`,
+        silent: false,
+    });
+    notification.onclick = () => {
+        window.focus();
+        notification.close();
+    };
+}
+
+function maybeNotifyUnpromptedMessage(messageId) {
+    if (!pendingNotification) return;
+
+    const ctx = getContext();
+    const chatKey = getChatKey(ctx);
+    const message = ctx.chat?.[messageId];
+    if (chatKey !== pendingNotification.chatKey || !message || message.is_user || message.is_system) return;
+
+    pendingNotification = null;
+    showBrowserNotification(message);
 }
 
 function renderPromptRow(prompt, index) {
@@ -389,6 +499,11 @@ function addSettingsUI() {
                 <input id="unprompted_run_on_chat_open" type="checkbox" ${s.runOnChatOpen ? 'checked' : ''}>
                 <span>Roll after opening a chat if cooldown allows</span>
             </label>
+            <label class="checkbox_label unprompted-row">
+                <input id="unprompted_browser_notifications" type="checkbox" ${s.browserNotifications ? 'checked' : ''}>
+                <span>Browser notifications</span>
+            </label>
+            <div id="unprompted_notification_note" class="unprompted-note"></div>
 
             <div class="unprompted-actions">
                 <button id="unprompted_test" class="menu_button menu_button_icon" title="Try to send one now">
@@ -436,6 +551,9 @@ function addSettingsUI() {
         getSettings().runOnChatOpen = !!this.checked;
         saveSettingsDebounced();
     });
+    $('#unprompted_browser_notifications').on('change', function () {
+        requestBrowserNotificationSetting(!!this.checked);
+    });
     $('#unprompted_test').on('click', () => trySendUnprompted(true));
     $('#unprompted_add_prompt').on('click', () => {
         getSettings().prompts.push(normalizePrompt({
@@ -460,6 +578,8 @@ function addSettingsUI() {
         renderPromptList();
         saveSettingsDebounced();
     });
+
+    syncNotificationUI();
 }
 
 jQuery(async () => {
@@ -468,7 +588,11 @@ jQuery(async () => {
 
     eventSource.on(event_types.GENERATION_STARTED, () => { isGenerating = true; });
     eventSource.on(event_types.GENERATION_ENDED, () => { isGenerating = false; });
-    eventSource.on(event_types.GENERATION_STOPPED, () => { isGenerating = false; });
+    eventSource.on(event_types.GENERATION_STOPPED, () => {
+        isGenerating = false;
+        pendingNotification = null;
+    });
+    eventSource.on(event_types.MESSAGE_RECEIVED, maybeNotifyUnpromptedMessage);
     eventSource.on(event_types.MESSAGE_SENT, () => {
         const chatKey = getChatKey();
         if (!chatKey) return;
@@ -481,6 +605,7 @@ jQuery(async () => {
             setTimeout(() => trySendUnprompted(false), 1500);
         }
     });
+    window.addEventListener('focus', syncNotificationUI);
 
     restartTimer();
     console.log(`[${EXT_NAME}] Loaded`);

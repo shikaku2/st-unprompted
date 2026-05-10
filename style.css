@@ -10,10 +10,8 @@
 }
 
 .unprompted-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
-    gap: 8px;
-    margin: 8px 0;
+    display: block;
+    margin: 8px;
 }
 
 .unprompted-grid label {
@@ -43,6 +41,12 @@
 
 .unprompted-macro-note {
     margin: 6px 0 10px;
+    font-size: 0.85em;
+    opacity: 0.65;
+}
+
+.unprompted-note {
+    margin: -2px 0 8px 24px;
     font-size: 0.85em;
     opacity: 0.65;
 }
