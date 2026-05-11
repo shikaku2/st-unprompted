@@ -1,6 +1,6 @@
 import { extension_settings, getContext } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../events.js';
-import { Generate, saveSettingsDebounced, substituteParams } from '../../../../script.js';
+import { Generate, deleteMessage, saveSettingsDebounced, substituteParams } from '../../../../script.js';
 
 const EXT_NAME = 'unprompted';
 const DISPLAY_NAME = 'Unprompted Messages';
@@ -8,6 +8,8 @@ const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
+const SAY_NOTHING_RE = /\[saynothing\]/i;
+const SAY_NOTHING_INSTRUCTION = 'Continue the conversation naturally, but if it is not natural to say anything, or {{user}} says they will message later or asks you to wait for them to message first, output only [saynothing].';
 
 const DEFAULT_PROMPTS = [
     {
@@ -15,35 +17,35 @@ const DEFAULT_PROMPTS = [
         enabled: true,
         weight: 5,
         label: 'Last thing discussed',
-        prompt: 'Send an unprompted message commenting naturally about the last thing you and {{user}} talked about. Context:\n[lastmessages=1]',
+        prompt: 'Send an unprompted message commenting naturally about the last thing you and {{user}} talked about. If it is not natural to say anything, or {{user}} has asked you to wait for them to message first, output only [saynothing]. Context:\n[lastmessages=1]',
     },
     {
         id: crypto.randomUUID(),
         enabled: true,
         weight: 5,
         label: 'Past day topic',
-        prompt: 'Send an unprompted message about an important-looking topic from the past day that you might want an update on. Context:\n[1d]',
+        prompt: 'Send an unprompted message about an important-looking topic from the past day that you might want an update on. If it is not natural to say anything, or {{user}} has asked you to wait for them to message first, output only [saynothing]. Context:\n[1d]',
     },
     {
         id: crypto.randomUUID(),
         enabled: true,
         weight: 3,
         label: 'Past week topic',
-        prompt: 'Send an unprompted message about an important-looking topic from the past week that you might want an update on. Context:\n[7d]',
+        prompt: 'Send an unprompted message about an important-looking topic from the past week that you might want an update on. If it is not natural to say anything, or {{user}} has asked you to wait for them to message first, output only [saynothing]. Context:\n[7d]',
     },
     {
         id: crypto.randomUUID(),
         enabled: true,
         weight: 2,
         label: 'Past month topic',
-        prompt: 'Send an unprompted message about an important-looking topic from the past month that you might want an update on. Context:\n[1m]',
+        prompt: 'Send an unprompted message about an important-looking topic from the past month that you might want an update on. If it is not natural to say anything, or {{user}} has asked you to wait for them to message first, output only [saynothing]. Context:\n[1m]',
     },
     {
         id: crypto.randomUUID(),
         enabled: true,
         weight: 5,
         label: 'What they are doing',
-        prompt: 'Send an unprompted message about something you are doing right now. Keep it in-character and natural.',
+        prompt: 'Send an unprompted message about something you are doing right now. Keep it in-character and natural. If it is not natural to say anything, or {{user}} has asked you to wait for them to message first, output only [saynothing].',
     },
 ];
 
@@ -123,7 +125,7 @@ function getChatKey(ctx = getContext()) {
 function getChatState(chatKey) {
     const s = getSettings();
     if (!s.stateByChat[chatKey]) {
-        s.stateByChat[chatKey] = { lastSentAt: 0, lastCheckedAt: 0 };
+        s.stateByChat[chatKey] = { lastSentAt: 0, lastCheckedAt: 0, silentUntilUserMessage: false };
     }
     return s.stateByChat[chatKey];
 }
@@ -167,6 +169,33 @@ function getRecentMessagesByCount(chat, count) {
     return usable.slice(Math.max(0, usable.length - count));
 }
 
+function getRecentMessagesByExchangeCount(chat, count) {
+    const messages = chat
+        .map((msg, index) => ({ msg, index }))
+        .filter(({ msg }) => msg && !msg.is_system && cleanMessageText(msg.mes));
+
+    if (!messages.length) return [];
+
+    let startIndex = messages[0].msg.is_user ? messages[0].index : -1;
+    let exchangesFound = 0;
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const { msg, index } = messages[i];
+
+        if (msg.is_user) {
+            exchangesFound++;
+            startIndex = index;
+            if (exchangesFound >= count) break;
+        }
+    }
+
+    if (startIndex < 0 || exchangesFound < count) {
+        startIndex = messages[0].index;
+    }
+
+    return chat.slice(startIndex).filter(msg => msg && !msg.is_system && cleanMessageText(msg.mes));
+}
+
 function getRecentMessagesByAge(chat, ageMs) {
     const cutoff = Date.now() - ageMs;
     return chat.filter(msg => {
@@ -204,6 +233,11 @@ function expandCustomMacros(prompt) {
         return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent messages)';
     });
 
+    expanded = expanded.replace(/\[lastexchanges=(\d+)\]/gi, (_match, countRaw) => {
+        const messages = getRecentMessagesByExchangeCount(chat, clampInteger(countRaw, 1, 1));
+        return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent exchanges)';
+    });
+
     expanded = expanded.replace(/\[((?:\d+(?:\.\d+)?[mdh])+)\]/gi, (_match, durationRaw) => {
         const messages = getRecentMessagesByAge(chat, durationToMs(durationRaw));
         return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${durationRaw})`;
@@ -216,6 +250,12 @@ function expandCustomMacros(prompt) {
     }
 
     return expanded.trim();
+}
+
+function addSayNothingInstruction(prompt) {
+    const trimmed = String(prompt || '').trim();
+    if (!trimmed || SAY_NOTHING_RE.test(trimmed)) return trimmed;
+    return `${trimmed}\n\n${expandCustomMacros(SAY_NOTHING_INSTRUCTION)}`;
 }
 
 function pickPrompt() {
@@ -259,6 +299,10 @@ function canSendNow({ manual = false } = {}) {
     if (!chatKey) return { ok: false, reason: 'no chat key' };
 
     const state = getChatState(chatKey);
+    if (state.silentUntilUserMessage) {
+        return { ok: false, reason: 'waiting for user message after [saynothing]' };
+    }
+
     const cooldownMs = positiveNumber(s.cooldownMinutes, DEFAULT_SETTINGS.cooldownMinutes) * MINUTE_MS;
     if (!manual && state.lastSentAt && Date.now() - state.lastSentAt < cooldownMs) {
         return { ok: false, reason: 'cooldown' };
@@ -282,7 +326,7 @@ async function trySendUnprompted(manual = false) {
         return false;
     }
 
-    const quietPrompt = expandCustomMacros(selected.prompt);
+    const quietPrompt = addSayNothingInstruction(expandCustomMacros(selected.prompt));
     if (!quietPrompt) {
         updateStatus('Selected prompt expanded to empty text.');
         if (manual) toastr.warning('Selected prompt expanded to empty text.', DISPLAY_NAME);
@@ -304,6 +348,10 @@ async function trySendUnprompted(manual = false) {
             quiet_prompt: quietPrompt,
             quietToLoud: true,
         });
+        if (allowed.state.silentUntilUserMessage) {
+            updateStatus('Paused by [saynothing] until user replies.');
+            return false;
+        }
         allowed.state.lastSentAt = Date.now();
         saveSettingsDebounced();
         updateStatus(`Last sent: ${selected.label}`);
@@ -437,13 +485,29 @@ function showBrowserNotification(message) {
     };
 }
 
-function maybeNotifyUnpromptedMessage(messageId) {
+async function maybeHandleUnpromptedMessage(messageId) {
     if (!pendingNotification) return;
 
     const ctx = getContext();
     const chatKey = getChatKey(ctx);
     const message = ctx.chat?.[messageId];
     if (chatKey !== pendingNotification.chatKey || !message || message.is_user || message.is_system) return;
+
+    if (SAY_NOTHING_RE.test(String(message.mes || ''))) {
+        pendingNotification = null;
+        const state = getChatState(chatKey);
+        state.silentUntilUserMessage = true;
+        state.lastCheckedAt = Date.now();
+        saveSettingsDebounced();
+        updateStatus('Paused by [saynothing] until user replies.');
+        try {
+            await deleteMessage(Number(messageId), undefined, false);
+        } catch (err) {
+            console.error(`[${EXT_NAME}] Failed to delete [saynothing] message`, err);
+            updateStatus('Failed to delete [saynothing] message. Check console.');
+        }
+        return;
+    }
 
     pendingNotification = null;
     showBrowserNotification(message);
@@ -463,7 +527,7 @@ function renderPromptRow(prompt, index) {
             <input class="text_pole unprompted-prompt-weight" type="number" min="0.01" step="0.01" value="${escHtml(prompt.weight)}">
         </label>
         <button class="menu_button menu_button_icon unprompted-delete" title="Delete prompt">
-            <i class="fa-solid fa-trash"></i>
+            <span aria-hidden="true">🗑️</span>
         </button>
     </div>
     <textarea class="text_pole unprompted-prompt-text" rows="4" spellcheck="false">${escHtml(prompt.prompt)}</textarea>
@@ -540,7 +604,7 @@ function addSettingsUI() {
             </div>
 
             <div id="unprompted_status" class="unprompted-status"></div>
-            <div class="unprompted-macro-note">Custom macros: [lastmessages=1], [1d], [168h], [1m], or combined forms like [1m2d6h].</div>
+            <div class="unprompted-macro-note">Custom macros: [lastmessages=1], [lastexchanges=1], [1d], [168h], [1m], or combined forms like [1m2d6h].</div>
             <div id="unprompted_prompt_list" class="unprompted-prompt-list"></div>
         </div>
     </div>
@@ -613,11 +677,13 @@ jQuery(async () => {
         unpromptedInFlight = false;
         pendingNotification = null;
     });
-    eventSource.on(event_types.MESSAGE_RECEIVED, maybeNotifyUnpromptedMessage);
+    eventSource.on(event_types.MESSAGE_RECEIVED, maybeHandleUnpromptedMessage);
     eventSource.on(event_types.MESSAGE_SENT, () => {
         const chatKey = getChatKey();
         if (!chatKey) return;
-        getChatState(chatKey).lastCheckedAt = Date.now();
+        const state = getChatState(chatKey);
+        state.lastCheckedAt = Date.now();
+        state.silentUntilUserMessage = false;
         saveSettingsDebounced();
     });
     eventSource.on(event_types.CHAT_CHANGED, () => {
