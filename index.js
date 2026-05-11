@@ -522,9 +522,10 @@ function renderPromptRow(prompt, index) {
             <span>Prompt ${index + 1}</span>
         </label>
         <input class="text_pole unprompted-prompt-label" type="text" value="${escHtml(prompt.label)}" title="Prompt label">
-        <label class="unprompted-weight-wrap" title="Relative weight">
+        <label class="unprompted-weight-wrap" title="Relative weight — higher weight = more likely to be picked">
             <span>Weight</span>
             <input class="text_pole unprompted-prompt-weight" type="number" min="0.01" step="0.01" value="${escHtml(prompt.weight)}">
+            <span class="unprompted-chance"></span>
         </label>
         <button class="menu_button menu_button_icon unprompted-delete" title="Delete prompt">
             <span aria-hidden="true">🗑️</span>
@@ -534,10 +535,34 @@ function renderPromptRow(prompt, index) {
 </div>`;
 }
 
+function updatePromptChances() {
+    const s = getSettings();
+    const list = document.getElementById('unprompted_prompt_list');
+    if (!list) return;
+    const eligible = s.prompts.filter(p => p.enabled && positiveNumber(p.weight, 0) > 0 && String(p.prompt || '').trim());
+    const total = eligible.reduce((sum, p) => sum + positiveNumber(p.weight, 0), 0);
+    list.querySelectorAll('.unprompted-prompt').forEach(row => {
+        const id = row.dataset.id;
+        const prompt = s.prompts.find(p => p.id === id);
+        const el = row.querySelector('.unprompted-chance');
+        if (!el || !prompt) return;
+        const isEligible = prompt.enabled && positiveNumber(prompt.weight, 0) > 0 && String(prompt.prompt || '').trim();
+        if (!isEligible || total <= 0) {
+            el.textContent = '';
+            el.title = '';
+        } else {
+            const pct = (positiveNumber(prompt.weight, 0) / total * 100).toFixed(1);
+            el.textContent = `= ${pct}%`;
+            el.title = 'Chance of being selected when this prompt fires';
+        }
+    });
+}
+
 function renderPromptList() {
     const list = document.getElementById('unprompted_prompt_list');
     if (!list) return;
     list.innerHTML = getSettings().prompts.map(renderPromptRow).join('');
+    updatePromptChances();
 }
 
 function writePromptFromRow(row) {
@@ -656,6 +681,7 @@ function addSettingsUI() {
         const row = this.closest('.unprompted-prompt');
         if (!row) return;
         writePromptFromRow(row);
+        updatePromptChances();
         saveSettingsDebounced();
     });
     $('#unprompted_prompt_list').on('click', '.unprompted-delete', function () {
