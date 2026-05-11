@@ -234,10 +234,16 @@ function pickPrompt() {
     return prompts[prompts.length - 1];
 }
 
+function hasUserDraft() {
+    const textarea = document.getElementById('send_textarea');
+    return typeof textarea?.value === 'string' && textarea.value.length > 0;
+}
+
 function canSendNow({ manual = false } = {}) {
     const s = getSettings();
     if (unpromptedInFlight) return { ok: false, reason: 'unprompted generation already running' };
     if (!manual && !s.enabled) return { ok: false, reason: 'disabled' };
+    if (hasUserDraft()) return { ok: false, reason: 'user draft in compose box' };
 
     const ctx = getContext();
     if ((!ctx.chatId && !ctx.groupId) || !Array.isArray(ctx.chat) || !ctx.chat.length) {
