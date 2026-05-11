@@ -31,7 +31,7 @@ Prompt text can use normal SillyTavern macros plus these extension macros:
 
 In duration macros, `m` means months, `d` means days, and `h` means hours.
 
-## `[saynothing]`,`[trylater]`
+## `[saynothing]`, `[trylater]`
 
 Use `[saynothing]` in an unprompted prompt as an instruction to the AI, not as text for the character to say.
 
@@ -59,3 +59,5 @@ Example prompt for `[trylater]`:
 {{user}} hasn't spoken in {{idleDuration}} minutes. If {{idleDuration}} is less than 30 minutes, output only [trylater]. Otherwise, reach out the way you naturally would. 
 Context: [lastexchanges=3]
 ```
+
+(Yes, {{idleDuration}} is a real base SillyTavern macro.  It gives a human readable time to when the last user message was sent)
