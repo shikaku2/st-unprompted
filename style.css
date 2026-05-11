@@ -1,5 +1,7 @@
 .unprompted-panel {
     margin-bottom: 8px;
+    min-width: 0;
+    overflow: hidden;
 }
 
 .unprompted-row {
@@ -43,6 +45,8 @@
     margin: 6px 0 10px;
     font-size: 0.85em;
     opacity: 0.65;
+    overflow-wrap: break-word;
+    word-break: break-word;
 }
 
 .unprompted-note {
