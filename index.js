@@ -604,7 +604,7 @@ function addSettingsUI() {
             </div>
 
             <div id="unprompted_status" class="unprompted-status"></div>
-            <div class="unprompted-macro-note">Custom macros: [lastmessages=1], [lastexchanges=1], [1d], [168h], [1m], or combined forms like [1m2d6h].</div>
+            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Custom macros: [lastmessages=1], [lastexchanges=1], [1d], [168h], [1m], or combined forms like [1m2d6h].</div>
             <div id="unprompted_prompt_list" class="unprompted-prompt-list"></div>
         </div>
     </div>
