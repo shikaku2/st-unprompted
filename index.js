@@ -9,6 +9,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const SAY_NOTHING_RE = /\[saynothing\]/i;
+const TRY_LATER_RE = /\[trylater\]/i;
 const SAY_NOTHING_INSTRUCTION = 'Continue the conversation naturally, but if it is not natural to say anything, or {{user}} says they will message later or asks you to wait for them to message first, output only [saynothing].';
 
 const DEFAULT_PROMPTS = [
@@ -63,6 +64,7 @@ const DEFAULT_SETTINGS = {
 let checkTimer = null;
 let unpromptedInFlight = false;
 let pendingNotification = null;
+let tryLaterDetected = false;
 
 function getSettings() {
     return extension_settings[EXT_NAME];
@@ -254,7 +256,7 @@ function expandCustomMacros(prompt) {
 
 function addSayNothingInstruction(prompt) {
     const trimmed = String(prompt || '').trim();
-    if (!trimmed || SAY_NOTHING_RE.test(trimmed)) return trimmed;
+    if (!trimmed || SAY_NOTHING_RE.test(trimmed) || TRY_LATER_RE.test(trimmed)) return trimmed;
     return `${trimmed}\n\n${expandCustomMacros(SAY_NOTHING_INSTRUCTION)}`;
 }
 
@@ -338,6 +340,7 @@ async function trySendUnprompted(manual = false) {
     updateStatus(`Sending: ${selected.label}`);
 
     unpromptedInFlight = true;
+    tryLaterDetected = false;
     try {
         pendingNotification = {
             chatKey: allowed.chatKey,
@@ -350,6 +353,10 @@ async function trySendUnprompted(manual = false) {
         });
         if (allowed.state.silentUntilUserMessage) {
             updateStatus('Paused by [saynothing] until user replies.');
+            return false;
+        }
+        if (tryLaterDetected) {
+            updateStatus('Idle: will try again next check.');
             return false;
         }
         allowed.state.lastSentAt = Date.now();
@@ -493,6 +500,18 @@ async function maybeHandleUnpromptedMessage(messageId) {
     const message = ctx.chat?.[messageId];
     if (chatKey !== pendingNotification.chatKey || !message || message.is_user || message.is_system) return;
 
+    if (TRY_LATER_RE.test(String(message.mes || ''))) {
+        pendingNotification = null;
+        tryLaterDetected = true;
+        updateStatus('Idle: will try again next check.');
+        try {
+            await deleteMessage(Number(messageId), undefined, false);
+        } catch (err) {
+            console.error(`[${EXT_NAME}] Failed to delete [trylater] message`, err);
+        }
+        return;
+    }
+
     if (SAY_NOTHING_RE.test(String(message.mes || ''))) {
         pendingNotification = null;
         const state = getChatState(chatKey);
@@ -629,7 +648,7 @@ function addSettingsUI() {
             </div>
 
             <div id="unprompted_status" class="unprompted-status"></div>
-            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Custom macros: [lastmessages=1], [lastexchanges=1], [1d], [168h], [1m], or combined forms like [1m2d6h].</div>
+            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Context macros: [lastmessages=1], [lastexchanges=1], [1d], [168h], [1m], combined forms like [1m2d6h]. AI output macros: [saynothing] (skip, pause until user replies), [trylater] (skip, retry next check).</div>
             <div id="unprompted_prompt_list" class="unprompted-prompt-list"></div>
         </div>
     </div>
@@ -702,6 +721,7 @@ jQuery(async () => {
     eventSource.on(event_types.GENERATION_STOPPED, () => {
         unpromptedInFlight = false;
         pendingNotification = null;
+        tryLaterDetected = false;
     });
     eventSource.on(event_types.MESSAGE_RECEIVED, maybeHandleUnpromptedMessage);
     eventSource.on(event_types.MESSAGE_SENT, () => {
