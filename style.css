@@ -34,6 +34,12 @@
     margin: 10px 0;
 }
 
+.unprompted-warning {
+    font-size: 0.85em;
+    color: var(--warning, #e8a838);
+    white-space: nowrap;
+}
+
 .unprompted-timer-display {
     font-size: 0.85em;
     opacity: 0.6;

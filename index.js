@@ -678,6 +678,7 @@ function addSettingsUI() {
                 <label>
                     <span>Max nonuser in row</span>
                     <input id="unprompted_max_ai" class="text_pole" type="number" min="1" step="1" value="${escHtml(s.maxAiInRow)}">
+                    <span id="unprompted_max_ai_warning" class="unprompted-warning"${s.maxAiInRow >= 2 ? ' hidden' : ''}>invalid — AI can't send if &lt;2</span>
                 </label>
             </div>
 
@@ -737,6 +738,8 @@ function addSettingsUI() {
         getSettings().maxAiInRow = clampInteger(this.value, 1, DEFAULT_SETTINGS.maxAiInRow);
         this.value = getSettings().maxAiInRow;
         saveSettingsDebounced();
+        const warning = document.getElementById('unprompted_max_ai_warning');
+        if (warning) warning.hidden = getSettings().maxAiInRow >= 2;
     });
     $('#unprompted_run_on_chat_open').on('change', function () {
         getSettings().runOnChatOpen = !!this.checked;
