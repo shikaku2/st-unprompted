@@ -401,7 +401,11 @@ function updateTimerDisplay() {
     const el = document.getElementById('unprompted_timer_display');
     if (!el) return;
     const s = getSettings();
-    if (!s.enabled || !checkTimer || !timerStartedAt) {
+    if (!s.enabled) {
+        el.textContent = '(disabled)';
+        return;
+    }
+    if (!checkTimer || !timerStartedAt) {
         el.textContent = '';
         return;
     }
@@ -716,6 +720,7 @@ function addSettingsUI() {
         getSettings().enabled = !!this.checked;
         saveSettingsDebounced();
         restartTimer();
+        updateTimerDisplay();
     });
     $('#unprompted_check_minutes').on('change', function () {
         getSettings().checkMinutes = clampInteger(this.value, 1, DEFAULT_SETTINGS.checkMinutes);
