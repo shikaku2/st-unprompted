@@ -9,7 +9,8 @@ SillyTavern extension that lets the current character occasionally send an unpro
 
 ## Behavior
 
-- Checks every configured number of minutes. Default: 30.
+- Checks every configured number of minutes. Default: 30. A countdown showing time until the next check is displayed next to the interval setting.
+- Optionally resets the check timer when the user sends a message ("Reset timer on user message send"). Useful when you want the next check to happen N minutes after you stop talking rather than on a fixed clock.
 - Enforces a per-chat cooldown. Default: 180 minutes.
 - Refuses to send if there are already too many assistant messages in a row. Default: 2.
 - Refuses to send while the chat compose box has a draft, so automatic messages do not wipe what you are typing.
@@ -24,12 +25,12 @@ Prompt text can use normal SillyTavern macros plus these extension macros:
 
 - `[lastmessages=N]`: inserts the last N non-system chat messages.
 - `[lastexchanges=N]`: inserts the last N exchanges. One normal exchange starts with one user message and includes every following non-system AI message until the next user message, so continued AI replies stay with that exchange. If the chat starts with AI messages before the first user message, that opening AI-only block counts as one exchange when needed.
+- `[lastmessages=1w]`, `[lastexchanges=7d]`: when given a duration instead of a count, these behave the same as the bare duration macros below — inserting messages from that time window. `[lastmessages=1w]`, `[lastexchanges=1w]`, and `[1w]` are all equivalent.
 - `[1d]`: inserts messages from the last day.
+- `[1w]`: inserts messages from the last week.
 - `[168h]`: inserts messages from the last 168 hours.
 - `[1m]`: inserts messages from the last month, treated as 30 days.
-- `[1m2d6h]`: combined month/day/hour duration.
-
-In duration macros, `m` means months, `d` means days, and `h` means hours.
+- `[1m2d6h]`: combined duration, supports `m` (months), `w` (weeks), `d` (days), `h` (hours).
 
 ## `[saynothing]`, `[trylater]`
 

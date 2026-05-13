@@ -34,6 +34,12 @@
     margin: 10px 0;
 }
 
+.unprompted-timer-display {
+    font-size: 0.85em;
+    opacity: 0.6;
+    white-space: nowrap;
+}
+
 .unprompted-status {
     min-height: 1.2em;
     margin: 6px 0;

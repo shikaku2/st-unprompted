@@ -5,6 +5,7 @@ import { Generate, deleteMessage, saveSettingsDebounced, substituteParams } from
 const EXT_NAME = 'unprompted';
 const DISPLAY_NAME = 'Unprompted Messages';
 const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
@@ -56,12 +57,15 @@ const DEFAULT_SETTINGS = {
     cooldownMinutes: 180,
     maxAiInRow: 2,
     runOnChatOpen: false,
+    resetTimerOnUserMessage: false,
     browserNotifications: false,
     prompts: DEFAULT_PROMPTS,
     stateByChat: {},
 };
 
 let checkTimer = null;
+let timerStartedAt = 0;
+let timerDisplayTick = null;
 let unpromptedInFlight = false;
 let pendingNotification = null;
 let tryLaterDetected = false;
@@ -212,12 +216,13 @@ function durationToMs(raw) {
     if (!compact) return 0;
 
     let total = 0;
-    const re = /(\d+(?:\.\d+)?)(m|d|h)/g;
+    const re = /(\d+(?:\.\d+)?)(m|d|h|w)/g;
     let match;
     while ((match = re.exec(compact)) !== null) {
         const amount = Number(match[1]);
         const unit = match[2];
         if (unit === 'm') total += amount * MONTH_MS;
+        if (unit === 'w') total += amount * WEEK_MS;
         if (unit === 'd') total += amount * DAY_MS;
         if (unit === 'h') total += amount * HOUR_MS;
     }
@@ -230,17 +235,35 @@ function expandCustomMacros(prompt) {
 
     let expanded = String(prompt || '');
 
-    expanded = expanded.replace(/\[lastmessages=(\d+)\]/gi, (_match, countRaw) => {
-        const messages = getRecentMessagesByCount(chat, clampInteger(countRaw, 1, 1));
-        return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent messages)';
+    expanded = expanded.replace(/\[lastmessages=([^\]]+)\]/gi, (_match, raw) => {
+        const trimmed = raw.trim();
+        if (/^\d+$/.test(trimmed)) {
+            const messages = getRecentMessagesByCount(chat, clampInteger(trimmed, 1, 1));
+            return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent messages)';
+        }
+        const ms = durationToMs(trimmed);
+        if (ms > 0) {
+            const messages = getRecentMessagesByAge(chat, ms);
+            return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${trimmed})`;
+        }
+        return '(no recent messages)';
     });
 
-    expanded = expanded.replace(/\[lastexchanges=(\d+)\]/gi, (_match, countRaw) => {
-        const messages = getRecentMessagesByExchangeCount(chat, clampInteger(countRaw, 1, 1));
-        return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent exchanges)';
+    expanded = expanded.replace(/\[lastexchanges=([^\]]+)\]/gi, (_match, raw) => {
+        const trimmed = raw.trim();
+        if (/^\d+$/.test(trimmed)) {
+            const messages = getRecentMessagesByExchangeCount(chat, clampInteger(trimmed, 1, 1));
+            return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent exchanges)';
+        }
+        const ms = durationToMs(trimmed);
+        if (ms > 0) {
+            const messages = getRecentMessagesByAge(chat, ms);
+            return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${trimmed})`;
+        }
+        return '(no recent exchanges)';
     });
 
-    expanded = expanded.replace(/\[((?:\d+(?:\.\d+)?[mdh])+)\]/gi, (_match, durationRaw) => {
+    expanded = expanded.replace(/\[((?:\d+(?:\.\d+)?[mdhw])+)\]/gi, (_match, durationRaw) => {
         const messages = getRecentMessagesByAge(chat, durationToMs(durationRaw));
         return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${durationRaw})`;
     });
@@ -374,13 +397,34 @@ async function trySendUnprompted(manual = false) {
     }
 }
 
+function updateTimerDisplay() {
+    const el = document.getElementById('unprompted_timer_display');
+    if (!el) return;
+    const s = getSettings();
+    if (!s.enabled || !checkTimer || !timerStartedAt) {
+        el.textContent = '';
+        return;
+    }
+    const intervalMs = positiveNumber(s.checkMinutes, DEFAULT_SETTINGS.checkMinutes) * MINUTE_MS;
+    const remaining = Math.max(0, intervalMs - (Date.now() - timerStartedAt));
+    const remainingMin = Math.ceil(remaining / MINUTE_MS);
+    el.textContent = remainingMin <= 1 ? '(<1min)' : `(${remainingMin}min)`;
+}
+
 function startTimer() {
     stopTimer();
     const s = getSettings();
     if (!s.enabled) return;
 
+    timerStartedAt = Date.now();
     const intervalMs = positiveNumber(s.checkMinutes, DEFAULT_SETTINGS.checkMinutes) * MINUTE_MS;
-    checkTimer = setInterval(() => trySendUnprompted(false), intervalMs);
+    checkTimer = setInterval(() => {
+        timerStartedAt = Date.now();
+        updateTimerDisplay();
+        trySendUnprompted(false);
+    }, intervalMs);
+    timerDisplayTick = setInterval(updateTimerDisplay, MINUTE_MS);
+    updateTimerDisplay();
     updateStatus(`Checking every ${s.checkMinutes} min.`);
 }
 
@@ -389,6 +433,12 @@ function stopTimer() {
         clearInterval(checkTimer);
         checkTimer = null;
     }
+    if (timerDisplayTick) {
+        clearInterval(timerDisplayTick);
+        timerDisplayTick = null;
+    }
+    timerStartedAt = 0;
+    updateTimerDisplay();
 }
 
 function restartTimer() {
@@ -614,6 +664,7 @@ function addSettingsUI() {
                     <span>Check every</span>
                     <input id="unprompted_check_minutes" class="text_pole" type="number" min="1" step="1" value="${escHtml(s.checkMinutes)}">
                     <span>min</span>
+                    <span id="unprompted_timer_display" class="unprompted-timer-display"></span>
                 </label>
                 <label>
                     <span>Cooldown</span>
@@ -629,6 +680,10 @@ function addSettingsUI() {
             <label class="checkbox_label unprompted-row">
                 <input id="unprompted_run_on_chat_open" type="checkbox" ${s.runOnChatOpen ? 'checked' : ''}>
                 <span>Roll after opening a chat if cooldown allows</span>
+            </label>
+            <label class="checkbox_label unprompted-row">
+                <input id="unprompted_reset_on_send" type="checkbox" ${s.resetTimerOnUserMessage ? 'checked' : ''}>
+                <span>Reset timer on user message send</span>
             </label>
             <label class="checkbox_label unprompted-row">
                 <input id="unprompted_browser_notifications" type="checkbox" ${s.browserNotifications ? 'checked' : ''}>
@@ -648,7 +703,7 @@ function addSettingsUI() {
             </div>
 
             <div id="unprompted_status" class="unprompted-status"></div>
-            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Context macros: [lastmessages=1], [lastexchanges=1], [1d], [168h], [1m], combined forms like [1m2d6h]. AI output macros: [saynothing] (skip, pause until user replies), [trylater] (skip, retry next check).</div>
+            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Context macros: [lastmessages=1], [lastexchanges=1], [1d], [1w], [168h], [1m], combined forms like [1m2d6h]. Duration aliases work too: [lastmessages=1w], [lastexchanges=7d]. AI output macros: [saynothing] (skip, pause until user replies), [trylater] (skip, retry next check).</div>
             <div id="unprompted_prompt_list" class="unprompted-prompt-list"></div>
         </div>
     </div>
@@ -680,6 +735,10 @@ function addSettingsUI() {
     });
     $('#unprompted_run_on_chat_open').on('change', function () {
         getSettings().runOnChatOpen = !!this.checked;
+        saveSettingsDebounced();
+    });
+    $('#unprompted_reset_on_send').on('change', function () {
+        getSettings().resetTimerOnUserMessage = !!this.checked;
         saveSettingsDebounced();
     });
     $('#unprompted_browser_notifications').on('change', function () {
@@ -731,6 +790,7 @@ jQuery(async () => {
         state.lastCheckedAt = Date.now();
         state.silentUntilUserMessage = false;
         saveSettingsDebounced();
+        if (getSettings().resetTimerOnUserMessage && getSettings().enabled) startTimer();
     });
     eventSource.on(event_types.CHAT_CHANGED, () => {
         restartTimer();
