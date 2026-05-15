@@ -1,6 +1,6 @@
 import { extension_settings, getContext } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../events.js';
-import { Generate, deleteMessage, saveSettingsDebounced, substituteParams } from '../../../../script.js';
+import { Generate, deleteMessage, saveSettingsDebounced, substituteParams, getRequestHeaders, characters, getPastCharacterChats } from '../../../../script.js';
 
 const EXT_NAME = 'unprompted';
 const DISPLAY_NAME = 'Unprompted Messages';
@@ -211,6 +211,100 @@ function getRecentMessagesByAge(chat, ageMs) {
     });
 }
 
+const otherChatMessagesCache = { key: '', ageMs: 0, fetchedAt: 0, messages: [] };
+const OTHER_CHAT_CACHE_TTL_MS = 60 * 1000;
+
+function parseChatLastMes(meta) {
+    if (!meta) return 0;
+    const raw = meta.last_mes;
+    if (!raw) return 0;
+    if (typeof raw === 'number') return raw;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function fetchChatMessages(fileName) {
+    const ctx = getContext();
+    const characterId = ctx.characterId;
+    if (characterId === undefined || !characters?.[characterId]) return [];
+    try {
+        const response = await fetch('/api/chats/get', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            cache: 'no-cache',
+            body: JSON.stringify({
+                ch_name: characters[characterId].name,
+                file_name: String(fileName).replace(/\.jsonl$/, ''),
+                avatar_url: characters[characterId].avatar,
+            }),
+        });
+        if (!response.ok) return [];
+        const data = await response.json();
+        if (!Array.isArray(data) || data.length === 0) return [];
+        // First element is chat metadata; the rest are messages.
+        return data.slice(1);
+    } catch (err) {
+        console.warn(`[${EXT_NAME}] Failed to load chat file ${fileName}`, err);
+        return [];
+    }
+}
+
+async function getOtherChatsMessagesSince(cutoff) {
+    const ctx = getContext();
+    // Multi-chat gathering is only supported for single-character chats (not groups).
+    if (ctx.groupId || ctx.characterId === undefined) return [];
+
+    const cacheKey = `char:${ctx.characterId}`;
+    const now = Date.now();
+    const ageMs = now - cutoff;
+    if (otherChatMessagesCache.key === cacheKey
+        && otherChatMessagesCache.ageMs >= ageMs
+        && now - otherChatMessagesCache.fetchedAt < OTHER_CHAT_CACHE_TTL_MS) {
+        return otherChatMessagesCache.messages.filter(m => parseMessageTime(m) >= cutoff);
+    }
+
+    let pastChats = [];
+    try {
+        pastChats = await getPastCharacterChats(ctx.characterId);
+    } catch (err) {
+        console.warn(`[${EXT_NAME}] Failed to list past chats`, err);
+        return [];
+    }
+    if (!Array.isArray(pastChats) || !pastChats.length) return [];
+
+    const currentChatFile = ctx.chatId ? String(ctx.chatId).replace(/\.jsonl$/, '') : '';
+    const candidates = pastChats.filter(meta => {
+        const fileName = String(meta?.file_name || '').replace(/\.jsonl$/, '');
+        if (!fileName || fileName === currentChatFile) return false;
+        const lastMes = parseChatLastMes(meta);
+        return lastMes && lastMes >= cutoff;
+    });
+
+    const loaded = await Promise.all(candidates.map(meta => fetchChatMessages(meta.file_name)));
+    const merged = loaded.flat().filter(msg => {
+        if (!msg || msg.is_system || !cleanMessageText(msg.mes)) return false;
+        const time = parseMessageTime(msg);
+        return time && time >= cutoff;
+    });
+
+    otherChatMessagesCache.key = cacheKey;
+    otherChatMessagesCache.ageMs = ageMs;
+    otherChatMessagesCache.fetchedAt = now;
+    otherChatMessagesCache.messages = merged;
+
+    return merged;
+}
+
+async function getAllRecentMessagesByAge(chat, ageMs) {
+    const cutoff = Date.now() - ageMs;
+    const current = getRecentMessagesByAge(chat, ageMs);
+    const others = await getOtherChatsMessagesSince(cutoff);
+    if (!others.length) return current;
+    const combined = others.concat(current);
+    combined.sort((a, b) => parseMessageTime(a) - parseMessageTime(b));
+    return combined;
+}
+
 function durationToMs(raw) {
     const compact = String(raw || '').trim().toLowerCase();
     if (!compact) return 0;
@@ -229,13 +323,24 @@ function durationToMs(raw) {
     return total;
 }
 
-function expandCustomMacros(prompt) {
+async function replaceAsync(input, regex, replacer) {
+    const matches = [];
+    input.replace(regex, (...args) => {
+        matches.push(args);
+        return '';
+    });
+    const replacements = await Promise.all(matches.map(args => Promise.resolve(replacer(...args))));
+    let i = 0;
+    return input.replace(regex, () => replacements[i++]);
+}
+
+async function expandCustomMacros(prompt) {
     const ctx = getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
 
     let expanded = String(prompt || '');
 
-    expanded = expanded.replace(/\[lastmessages=([^\]]+)\]/gi, (_match, raw) => {
+    expanded = await replaceAsync(expanded, /\[lastmessages=([^\]]+)\]/gi, async (_match, raw) => {
         const trimmed = raw.trim();
         if (/^\d+$/.test(trimmed)) {
             const messages = getRecentMessagesByCount(chat, clampInteger(trimmed, 1, 1));
@@ -243,13 +348,13 @@ function expandCustomMacros(prompt) {
         }
         const ms = durationToMs(trimmed);
         if (ms > 0) {
-            const messages = getRecentMessagesByAge(chat, ms);
+            const messages = await getAllRecentMessagesByAge(chat, ms);
             return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${trimmed})`;
         }
         return '(no recent messages)';
     });
 
-    expanded = expanded.replace(/\[lastexchanges=([^\]]+)\]/gi, (_match, raw) => {
+    expanded = await replaceAsync(expanded, /\[lastexchanges=([^\]]+)\]/gi, async (_match, raw) => {
         const trimmed = raw.trim();
         if (/^\d+$/.test(trimmed)) {
             const messages = getRecentMessagesByExchangeCount(chat, clampInteger(trimmed, 1, 1));
@@ -257,14 +362,14 @@ function expandCustomMacros(prompt) {
         }
         const ms = durationToMs(trimmed);
         if (ms > 0) {
-            const messages = getRecentMessagesByAge(chat, ms);
+            const messages = await getAllRecentMessagesByAge(chat, ms);
             return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${trimmed})`;
         }
         return '(no recent exchanges)';
     });
 
-    expanded = expanded.replace(/\[((?:\d+(?:\.\d+)?[mdhw])+)\]/gi, (_match, durationRaw) => {
-        const messages = getRecentMessagesByAge(chat, durationToMs(durationRaw));
+    expanded = await replaceAsync(expanded, /\[((?:\d+(?:\.\d+)?[mdhw])+)\]/gi, async (_match, durationRaw) => {
+        const messages = await getAllRecentMessagesByAge(chat, durationToMs(durationRaw));
         return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${durationRaw})`;
     });
 
@@ -277,10 +382,11 @@ function expandCustomMacros(prompt) {
     return expanded.trim();
 }
 
-function addSayNothingInstruction(prompt) {
+async function addSayNothingInstruction(prompt) {
     const trimmed = String(prompt || '').trim();
     if (!trimmed || SAY_NOTHING_RE.test(trimmed) || TRY_LATER_RE.test(trimmed)) return trimmed;
-    return `${trimmed}\n\n${expandCustomMacros(SAY_NOTHING_INSTRUCTION)}`;
+    const appendix = await expandCustomMacros(SAY_NOTHING_INSTRUCTION);
+    return `${trimmed}\n\n${appendix}`;
 }
 
 function pickPrompt() {
@@ -351,7 +457,7 @@ async function trySendUnprompted(manual = false) {
         return false;
     }
 
-    const quietPrompt = addSayNothingInstruction(expandCustomMacros(selected.prompt));
+    const quietPrompt = await addSayNothingInstruction(await expandCustomMacros(selected.prompt));
     if (!quietPrompt) {
         updateStatus('Selected prompt expanded to empty text.');
         if (manual) toastr.warning('Selected prompt expanded to empty text.', DISPLAY_NAME);
@@ -546,6 +652,37 @@ function showBrowserNotification(message) {
     };
 }
 
+async function robustDeleteMessage(messageId, label) {
+    const id = Number(messageId);
+    const ctx = getContext();
+    const targetMessage = ctx.chat?.[id];
+
+    // Yield to let any pending streaming/DOM finalization microtasks settle.
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    let deleted = false;
+    try {
+        await deleteMessage(id, undefined, false);
+        deleted = true;
+    } catch (err) {
+        console.error(`[${EXT_NAME}] deleteMessage threw for ${label}`, err);
+    }
+
+    // Verify deletion. ST's deleteMessage silently returns if it can't find the
+    // .mes[mesid="..."] element (which happens during some streaming finishes).
+    const ctxAfter = getContext();
+    const chatArr = ctxAfter.chat;
+    if (Array.isArray(chatArr) && targetMessage && chatArr[id] === targetMessage) {
+        chatArr.splice(id, 1);
+        console.warn(`[${EXT_NAME}] deleteMessage did not remove ${label} from chat array; spliced manually.`);
+    }
+    const stragglerEl = document.querySelector(`#chat .mes[mesid="${id}"]`);
+    if (stragglerEl && Array.isArray(chatArr) && chatArr[id] !== targetMessage) {
+        stragglerEl.remove();
+    }
+    return deleted;
+}
+
 async function maybeHandleUnpromptedMessage(messageId) {
     if (!pendingNotification) return;
 
@@ -554,31 +691,24 @@ async function maybeHandleUnpromptedMessage(messageId) {
     const message = ctx.chat?.[messageId];
     if (chatKey !== pendingNotification.chatKey || !message || message.is_user || message.is_system) return;
 
-    if (TRY_LATER_RE.test(String(message.mes || ''))) {
+    const text = String(message.mes || '');
+
+    if (TRY_LATER_RE.test(text)) {
         pendingNotification = null;
         tryLaterDetected = true;
         updateStatus('Idle: will try again next check.');
-        try {
-            await deleteMessage(Number(messageId), undefined, false);
-        } catch (err) {
-            console.error(`[${EXT_NAME}] Failed to delete [trylater] message`, err);
-        }
+        await robustDeleteMessage(messageId, '[trylater]');
         return;
     }
 
-    if (SAY_NOTHING_RE.test(String(message.mes || ''))) {
+    if (SAY_NOTHING_RE.test(text)) {
         pendingNotification = null;
         const state = getChatState(chatKey);
         state.silentUntilUserMessage = true;
         state.lastCheckedAt = Date.now();
         saveSettingsDebounced();
         updateStatus('Paused by [saynothing] until user replies.');
-        try {
-            await deleteMessage(Number(messageId), undefined, false);
-        } catch (err) {
-            console.error(`[${EXT_NAME}] Failed to delete [saynothing] message`, err);
-            updateStatus('Failed to delete [saynothing] message. Check console.');
-        }
+        await robustDeleteMessage(messageId, '[saynothing]');
         return;
     }
 
@@ -708,7 +838,7 @@ function addSettingsUI() {
             </div>
 
             <div id="unprompted_status" class="unprompted-status"></div>
-            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Context macros: [lastmessages=1], [lastexchanges=1], [1d], [1w], [168h], [1m], combined forms like [1m2d6h]. Duration aliases work too: [lastmessages=1w], [lastexchanges=7d]. AI output macros: [saynothing] (skip, pause until user replies), [trylater] (skip, retry next check).</div>
+            <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Context macros: [lastmessages=1], [lastexchanges=1], [1d], [1w], [168h], [1m], combined forms like [1m2d6h]. Duration aliases work too: [lastmessages=1w], [lastexchanges=7d]. Duration macros also pull in messages from other recent chat files with this character. AI output macros: [saynothing] (skip, pause until user replies), [trylater] (skip, retry next check).</div>
             <div id="unprompted_prompt_list" class="unprompted-prompt-list"></div>
         </div>
     </div>
