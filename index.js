@@ -74,18 +74,14 @@ function getSettings() {
     return extension_settings[EXT_NAME];
 }
 
-function clone(value) {
-    return JSON.parse(JSON.stringify(value));
-}
-
 function loadSettings() {
     const existing = extension_settings[EXT_NAME] || {};
-    const merged = Object.assign(clone(DEFAULT_SETTINGS), existing);
+    const merged = Object.assign(structuredClone(DEFAULT_SETTINGS), existing);
     merged.cooldownMinutes = normalizeCooldownMinutes(existing);
     delete merged.cooldownHours;
     merged.prompts = Array.isArray(existing.prompts) && existing.prompts.length
         ? existing.prompts.map(normalizePrompt)
-        : clone(DEFAULT_PROMPTS);
+        : structuredClone(DEFAULT_PROMPTS);
     merged.stateByChat = existing.stateByChat && typeof existing.stateByChat === 'object'
         ? existing.stateByChat
         : {};
@@ -742,20 +738,20 @@ function updatePromptChances() {
     const s = getSettings();
     const list = document.getElementById('unprompted_prompt_list');
     if (!list) return;
+    const promptMap = new Map(s.prompts.map(p => [p.id, p]));
     const eligible = s.prompts.filter(p => p.enabled && positiveNumber(p.weight, 0) > 0 && String(p.prompt || '').trim());
     const total = eligible.reduce((sum, p) => sum + positiveNumber(p.weight, 0), 0);
     list.querySelectorAll('.unprompted-prompt').forEach(row => {
-        const id = row.dataset.id;
-        const prompt = s.prompts.find(p => p.id === id);
+        const prompt = promptMap.get(row.dataset.id);
         const el = row.querySelector('.unprompted-chance');
         if (!el || !prompt) return;
-        const isEligible = prompt.enabled && positiveNumber(prompt.weight, 0) > 0 && String(prompt.prompt || '').trim();
+        const weight = positiveNumber(prompt.weight, 0);
+        const isEligible = prompt.enabled && weight > 0 && String(prompt.prompt || '').trim();
         if (!isEligible || total <= 0) {
             el.textContent = '';
             el.title = '';
         } else {
-            const pct = (positiveNumber(prompt.weight, 0) / total * 100).toFixed(1);
-            el.textContent = `= ${pct}%`;
+            el.textContent = `= ${(weight / total * 100).toFixed(1)}%`;
             el.title = 'Chance of being selected when this prompt fires';
         }
     });
@@ -931,6 +927,7 @@ jQuery(async () => {
         if (getSettings().resetTimerOnUserMessage && getSettings().enabled) startTimer();
     });
     eventSource.on(event_types.CHAT_CHANGED, () => {
+        otherChatMessagesCache.key = '';
         restartTimer();
         if (getSettings().enabled && getSettings().runOnChatOpen) {
             setTimeout(() => trySendUnprompted(false), 1500);
