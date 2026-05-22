@@ -54,6 +54,7 @@ const DEFAULT_PROMPTS = [
 const DEFAULT_SETTINGS = {
     enabled: false,
     checkMinutes: 30,
+    checkMinutesMax: 0,
     cooldownMinutes: 180,
     maxAiInRow: 2,
     runOnChatOpen: false,
@@ -65,6 +66,7 @@ const DEFAULT_SETTINGS = {
 
 let checkTimer = null;
 let timerStartedAt = 0;
+let timerScheduledMs = 0;
 let timerDisplayTick = null;
 let unpromptedInFlight = false;
 let pendingNotification = null;
@@ -511,32 +513,54 @@ function updateTimerDisplay() {
         el.textContent = '';
         return;
     }
-    const intervalMs = positiveNumber(s.checkMinutes, DEFAULT_SETTINGS.checkMinutes) * MINUTE_MS;
-    const remaining = Math.max(0, intervalMs - (Date.now() - timerStartedAt));
+    const remaining = Math.max(0, timerScheduledMs - (Date.now() - timerStartedAt));
     const remainingMin = Math.ceil(remaining / MINUTE_MS);
     el.textContent = remainingMin <= 1 ? '(<1min)' : `(${remainingMin}min)`;
+}
+
+function pickCheckIntervalMs() {
+    const s = getSettings();
+    const min = positiveNumber(s.checkMinutes, DEFAULT_SETTINGS.checkMinutes);
+    const max = Number(s.checkMinutesMax) || 0;
+    if (max > 0 && max >= min + 1) {
+        const picked = Math.floor(Math.random() * (max - min + 1)) + min;
+        return picked * MINUTE_MS;
+    }
+    return min * MINUTE_MS;
+}
+
+function scheduleNextCheck() {
+    const s = getSettings();
+    if (!s.enabled) return;
+    timerScheduledMs = pickCheckIntervalMs();
+    timerStartedAt = Date.now();
+    checkTimer = setTimeout(() => {
+        checkTimer = null;
+        trySendUnprompted(false);
+        scheduleNextCheck();
+    }, timerScheduledMs);
+    updateTimerDisplay();
 }
 
 function startTimer() {
     stopTimer();
     const s = getSettings();
     if (!s.enabled) return;
-
-    timerStartedAt = Date.now();
-    const intervalMs = positiveNumber(s.checkMinutes, DEFAULT_SETTINGS.checkMinutes) * MINUTE_MS;
-    checkTimer = setInterval(() => {
-        timerStartedAt = Date.now();
-        updateTimerDisplay();
-        trySendUnprompted(false);
-    }, intervalMs);
-    timerDisplayTick = setInterval(updateTimerDisplay, MINUTE_MS);
-    updateTimerDisplay();
-    updateStatus(`Checking every ${s.checkMinutes} min.`);
+    if (!timerDisplayTick) {
+        timerDisplayTick = setInterval(updateTimerDisplay, MINUTE_MS);
+    }
+    scheduleNextCheck();
+    const min = positiveNumber(s.checkMinutes, DEFAULT_SETTINGS.checkMinutes);
+    const max = Number(s.checkMinutesMax) || 0;
+    const statusText = (max > 0 && max >= min + 1)
+        ? `Checking every ${min}–${max} min.`
+        : `Checking every ${min} min.`;
+    updateStatus(statusText);
 }
 
 function stopTimer() {
     if (checkTimer) {
-        clearInterval(checkTimer);
+        clearTimeout(checkTimer);
         checkTimer = null;
     }
     if (timerDisplayTick) {
@@ -544,6 +568,7 @@ function stopTimer() {
         timerDisplayTick = null;
     }
     timerStartedAt = 0;
+    timerScheduledMs = 0;
     updateTimerDisplay();
 }
 
@@ -793,6 +818,8 @@ function addSettingsUI() {
                 <label>
                     <span>Check every</span>
                     <input id="unprompted_check_minutes" class="text_pole" type="number" min="1" step="1" value="${escHtml(s.checkMinutes)}">
+                    <span>to</span>
+                    <input id="unprompted_check_minutes_max" class="text_pole" type="number" min="0" step="1" value="${escHtml(s.checkMinutesMax)}" title="Random upper bound (0 = fixed interval). Must be at least X+1 to take effect.">
                     <span>min</span>
                     <span id="unprompted_timer_display" class="unprompted-timer-display"></span>
                 </label>
@@ -852,6 +879,13 @@ function addSettingsUI() {
     $('#unprompted_check_minutes').on('change', function () {
         getSettings().checkMinutes = clampInteger(this.value, 1, DEFAULT_SETTINGS.checkMinutes);
         this.value = getSettings().checkMinutes;
+        saveSettingsDebounced();
+        restartTimer();
+    });
+    $('#unprompted_check_minutes_max').on('change', function () {
+        const val = parseInt(this.value, 10);
+        getSettings().checkMinutesMax = Number.isFinite(val) && val >= 0 ? val : 0;
+        this.value = getSettings().checkMinutesMax;
         saveSettingsDebounced();
         restartTimer();
     });
