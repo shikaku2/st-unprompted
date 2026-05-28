@@ -1,6 +1,6 @@
 import { extension_settings, getContext } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../events.js';
-import { Generate, deleteMessage, saveSettingsDebounced, substituteParams, getRequestHeaders, characters, getPastCharacterChats } from '../../../../script.js';
+import { Generate, deleteMessage, saveSettingsDebounced, substituteParams, getRequestHeaders, characters, getPastCharacterChats, setExtensionPrompt } from '../../../../script.js';
 
 const EXT_NAME = 'unprompted';
 const DISPLAY_NAME = 'Unprompted Messages';
@@ -60,6 +60,7 @@ const DEFAULT_SETTINGS = {
     runOnChatOpen: false,
     resetTimerOnUserMessage: false,
     browserNotifications: false,
+    useSystemMessage: false,
     prompts: DEFAULT_PROMPTS,
     stateByChat: {},
 };
@@ -466,6 +467,7 @@ async function trySendUnprompted(manual = false) {
     saveSettingsDebounced();
     updateStatus(`Sending: ${selected.label}`);
 
+    const s = getSettings();
     unpromptedInFlight = true;
     tryLaterDetected = false;
     try {
@@ -473,11 +475,16 @@ async function trySendUnprompted(manual = false) {
             chatKey: allowed.chatKey,
             startedAt: Date.now(),
         };
-        await Generate('normal', {
-            automatic_trigger: true,
-            quiet_prompt: quietPrompt,
-            quietToLoud: true,
-        });
+        if (s.useSystemMessage) {
+            setExtensionPrompt(EXT_NAME, quietPrompt, 0, 0, false, 0);
+            await Generate('normal', { automatic_trigger: true });
+        } else {
+            await Generate('normal', {
+                automatic_trigger: true,
+                quiet_prompt: quietPrompt,
+                quietToLoud: true,
+            });
+        }
         if (allowed.state.silentUntilUserMessage) {
             updateStatus('Paused by [saynothing] until user replies.');
             return false;
@@ -498,6 +505,7 @@ async function trySendUnprompted(manual = false) {
         return false;
     } finally {
         unpromptedInFlight = false;
+        setExtensionPrompt(EXT_NAME, '', 0, 0);
     }
 }
 
@@ -652,7 +660,15 @@ async function requestBrowserNotificationSetting(enable) {
     syncNotificationUI();
 }
 
-function showBrowserNotification(message) {
+function getCharacterIconUrl() {
+    const ctx = getContext();
+    if (ctx.characterId !== undefined && characters?.[ctx.characterId]?.avatar) {
+        return `/thumbnail?type=avatar&file=${encodeURIComponent(characters[ctx.characterId].avatar)}`;
+    }
+    return '';
+}
+
+function showBrowserNotification(message, iconUrl = '') {
     const s = getSettings();
     if (!s.browserNotifications || !canUseBrowserNotifications() || Notification.permission !== 'granted') {
         syncNotificationUI();
@@ -663,10 +679,10 @@ function showBrowserNotification(message) {
     const preview = previewText(message?.mes || '');
     if (!preview) return;
 
-    const notification = new Notification(`${name}: ${preview}`, {
-        tag: `${EXT_NAME}-${Date.now()}`,
-        silent: false,
-    });
+    const opts = { tag: `${EXT_NAME}-${Date.now()}`, silent: false };
+    if (iconUrl) opts.icon = iconUrl;
+
+    const notification = new Notification(`${name}: ${preview}`, opts);
     notification.onclick = () => {
         window.focus();
         notification.close();
@@ -734,7 +750,7 @@ async function maybeHandleUnpromptedMessage(messageId) {
     }
 
     pendingNotification = null;
-    showBrowserNotification(message);
+    showBrowserNotification(message, getCharacterIconUrl());
 }
 
 function renderPromptRow(prompt, index) {
@@ -843,11 +859,22 @@ function addSettingsUI() {
                 <input id="unprompted_reset_on_send" type="checkbox" ${s.resetTimerOnUserMessage ? 'checked' : ''}>
                 <span>Reset timer on user message send</span>
             </label>
-            <label class="checkbox_label unprompted-row">
-                <input id="unprompted_browser_notifications" type="checkbox" ${s.browserNotifications ? 'checked' : ''}>
-                <span>Browser notifications</span>
-            </label>
+            <div class="unprompted-row unprompted-notif-row">
+                <label class="checkbox_label">
+                    <input id="unprompted_browser_notifications" type="checkbox" ${s.browserNotifications ? 'checked' : ''}>
+                    <span>Browser notifications</span>
+                </label>
+                <button id="unprompted_test_notification" class="menu_button menu_button_icon" title="Send a test browser notification">
+                    <i class="fa-solid fa-bell"></i>
+                    <span>Test</span>
+                </button>
+            </div>
             <div id="unprompted_notification_note" class="unprompted-note"></div>
+            <label class="checkbox_label unprompted-row">
+                <input id="unprompted_use_system_message" type="checkbox" ${s.useSystemMessage ? 'checked' : ''}>
+                <span>Send as system message</span>
+            </label>
+            <div class="unprompted-note">When enabled, the unprompted prompt is injected as a system message (role 0) instead of a user turn. It does not appear in past-messages macros and is not visible in chat history.</div>
 
             <div class="unprompted-actions">
                 <button id="unprompted_test" class="menu_button menu_button_icon" title="Try to send one now">
@@ -911,6 +938,33 @@ function addSettingsUI() {
     });
     $('#unprompted_browser_notifications').on('change', function () {
         requestBrowserNotificationSetting(!!this.checked);
+    });
+    $('#unprompted_test_notification').on('click', async () => {
+        if (!canUseBrowserNotifications()) {
+            toastr.warning('Browser notifications are not supported in this browser.', DISPLAY_NAME);
+            return;
+        }
+        let permission = Notification.permission;
+        if (permission === 'default') {
+            permission = await Notification.requestPermission();
+        }
+        if (permission !== 'granted') {
+            toastr.warning('Browser notification permission was not granted.', DISPLAY_NAME);
+            return;
+        }
+        const ctx = getContext();
+        const charName = (ctx.characterId !== undefined && characters?.[ctx.characterId]?.name)
+            ? characters[ctx.characterId].name
+            : 'AI';
+        const iconUrl = getCharacterIconUrl();
+        const opts = { tag: `${EXT_NAME}-test-${Date.now()}`, silent: false };
+        if (iconUrl) opts.icon = iconUrl;
+        const n = new Notification(`${charName}: Testing Browser Notifications.`, opts);
+        n.onclick = () => { window.focus(); n.close(); };
+    });
+    $('#unprompted_use_system_message').on('change', function () {
+        getSettings().useSystemMessage = !!this.checked;
+        saveSettingsDebounced();
     });
     $('#unprompted_test').on('click', () => trySendUnprompted(true));
     $('#unprompted_add_prompt').on('click', () => {
