@@ -60,6 +60,7 @@ const DEFAULT_SETTINGS = {
     runOnChatOpen: false,
     resetTimerOnUserMessage: false,
     browserNotifications: false,
+    browserNotificationsAll: false,
     useSystemMessage: false,
     prompts: DEFAULT_PROMPTS,
     stateByChat: {},
@@ -611,6 +612,7 @@ function getNotificationUnavailableReason() {
 
 function syncNotificationUI() {
     const checkbox = document.getElementById('unprompted_browser_notifications');
+    const checkboxAll = document.getElementById('unprompted_browser_notifications_all');
     const note = document.getElementById('unprompted_notification_note');
     if (!checkbox) return;
 
@@ -621,12 +623,17 @@ function syncNotificationUI() {
     if (!canEnable) {
         checkbox.checked = false;
         checkbox.disabled = true;
+        if (checkboxAll) { checkboxAll.checked = false; checkboxAll.disabled = true; }
         if (note) note.textContent = unavailableReason;
         return;
     }
 
     checkbox.disabled = false;
     checkbox.checked = !!s.browserNotifications && Notification.permission === 'granted';
+    if (checkboxAll) {
+        checkboxAll.disabled = Notification.permission !== 'granted';
+        checkboxAll.checked = !!s.browserNotificationsAll && Notification.permission === 'granted';
+    }
     if (note) {
         note.textContent = Notification.permission === 'granted'
             ? 'Browser notifications are enabled for this site.'
@@ -668,25 +675,23 @@ function getCharacterIconUrl() {
     return '';
 }
 
+function fireNotification(message, iconUrl = '') {
+    const name = message?.name || 'AI';
+    const preview = previewText(message?.mes || '');
+    if (!preview) return;
+    const opts = { tag: `${EXT_NAME}-${Date.now()}`, silent: false };
+    if (iconUrl) opts.icon = iconUrl;
+    const notification = new Notification(`${name}: ${preview}`, opts);
+    notification.onclick = () => { window.focus(); notification.close(); };
+}
+
 function showBrowserNotification(message, iconUrl = '') {
     const s = getSettings();
     if (!s.browserNotifications || !canUseBrowserNotifications() || Notification.permission !== 'granted') {
         syncNotificationUI();
         return;
     }
-
-    const name = message?.name || 'AI';
-    const preview = previewText(message?.mes || '');
-    if (!preview) return;
-
-    const opts = { tag: `${EXT_NAME}-${Date.now()}`, silent: false };
-    if (iconUrl) opts.icon = iconUrl;
-
-    const notification = new Notification(`${name}: ${preview}`, opts);
-    notification.onclick = () => {
-        window.focus();
-        notification.close();
-    };
+    fireNotification(message, iconUrl);
 }
 
 async function robustDeleteMessage(messageId, label) {
@@ -721,11 +726,19 @@ async function robustDeleteMessage(messageId, label) {
 }
 
 async function maybeHandleUnpromptedMessage(messageId) {
-    if (!pendingNotification) return;
-
     const ctx = getContext();
-    const chatKey = getChatKey(ctx);
     const message = ctx.chat?.[messageId];
+
+    if (!pendingNotification) {
+        const s = getSettings();
+        if (s.browserNotificationsAll && !document.hasFocus() && message && !message.is_user && !message.is_system
+            && canUseBrowserNotifications() && Notification.permission === 'granted') {
+            fireNotification(message, getCharacterIconUrl());
+        }
+        return;
+    }
+
+    const chatKey = getChatKey(ctx);
     if (chatKey !== pendingNotification.chatKey || !message || message.is_user || message.is_system) return;
 
     const text = String(message.mes || '');
@@ -871,6 +884,10 @@ function addSettingsUI() {
             </div>
             <div id="unprompted_notification_note" class="unprompted-note"></div>
             <label class="checkbox_label unprompted-row">
+                <input id="unprompted_browser_notifications_all" type="checkbox" ${s.browserNotificationsAll ? 'checked' : ''}>
+                <span>Also notify on regular AI messages when page is unfocused</span>
+            </label>
+            <label class="checkbox_label unprompted-row">
                 <input id="unprompted_use_system_message" type="checkbox" ${s.useSystemMessage ? 'checked' : ''}>
                 <span>Send as system message</span>
             </label>
@@ -938,6 +955,10 @@ function addSettingsUI() {
     });
     $('#unprompted_browser_notifications').on('change', function () {
         requestBrowserNotificationSetting(!!this.checked);
+    });
+    $('#unprompted_browser_notifications_all').on('change', function () {
+        getSettings().browserNotificationsAll = !!this.checked;
+        saveSettingsDebounced();
     });
     $('#unprompted_test_notification').on('click', async () => {
         if (!canUseBrowserNotifications()) {
