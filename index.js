@@ -675,6 +675,24 @@ function getCharacterIconUrl() {
     return '';
 }
 
+async function getCharacterIconDataUrl() {
+    const url = getCharacterIconUrl();
+    if (!url) return '';
+    try {
+        const response = await fetch(url);
+        if (!response.ok) return url;
+        const blob = await response.blob();
+        return await new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => resolve(url);
+            reader.readAsDataURL(blob);
+        });
+    } catch {
+        return url;
+    }
+}
+
 function fireNotification(message, iconUrl = '') {
     const name = message?.name || 'AI';
     const preview = previewText(message?.mes || '');
@@ -733,7 +751,7 @@ async function maybeHandleUnpromptedMessage(messageId) {
         const s = getSettings();
         if (s.browserNotificationsAll && !document.hasFocus() && message && !message.is_user && !message.is_system
             && canUseBrowserNotifications() && Notification.permission === 'granted') {
-            fireNotification(message, getCharacterIconUrl());
+            fireNotification(message, await getCharacterIconDataUrl());
         }
         return;
     }
@@ -763,7 +781,7 @@ async function maybeHandleUnpromptedMessage(messageId) {
     }
 
     pendingNotification = null;
-    showBrowserNotification(message, getCharacterIconUrl());
+    showBrowserNotification(message, await getCharacterIconDataUrl());
 }
 
 function renderPromptRow(prompt, index) {
@@ -977,7 +995,7 @@ function addSettingsUI() {
         const charName = (ctx.characterId !== undefined && characters?.[ctx.characterId]?.name)
             ? characters[ctx.characterId].name
             : 'AI';
-        const iconUrl = getCharacterIconUrl();
+        const iconUrl = await getCharacterIconDataUrl();
         const opts = { tag: `${EXT_NAME}-test-${Date.now()}`, silent: false };
         if (iconUrl) opts.icon = iconUrl;
         const n = new Notification(`${charName}: Testing Browser Notifications.`, opts);
