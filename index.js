@@ -73,6 +73,7 @@ let timerDisplayTick = null;
 let unpromptedInFlight = false;
 let pendingNotification = null;
 let tryLaterDetected = false;
+let pendingDelete = null; // { id, label } — deletion deferred until after Generate() resolves
 
 function getSettings() {
     return extension_settings[EXT_NAME];
@@ -486,6 +487,14 @@ async function trySendUnprompted(manual = false) {
                 quietToLoud: true,
             });
         }
+        // Execute any deletion that was deferred out of the MESSAGE_RECEIVED handler.
+        // saveReply calls addOneMessage(chat[id]) after awaiting MESSAGE_RECEIVED, so
+        // deleting during the event would leave chat[id] undefined and crash ST.
+        if (pendingDelete) {
+            const { id, label } = pendingDelete;
+            pendingDelete = null;
+            await robustDeleteMessage(id, label);
+        }
         if (allowed.state.silentUntilUserMessage) {
             updateStatus('Paused by [saynothing] until user replies.');
             return false;
@@ -500,6 +509,7 @@ async function trySendUnprompted(manual = false) {
         return true;
     } catch (err) {
         pendingNotification = null;
+        pendingDelete = null;
         console.error(`[${EXT_NAME}] Failed to generate unprompted message`, err);
         updateStatus('Generation failed. Check console.');
         if (manual) toastr.error('Generation failed. Check console.', DISPLAY_NAME);
@@ -765,7 +775,9 @@ async function maybeHandleUnpromptedMessage(messageId) {
         pendingNotification = null;
         tryLaterDetected = true;
         updateStatus('Idle: will try again next check.');
-        await robustDeleteMessage(messageId, '[trylater]');
+        // Defer deletion: ST's saveReply calls addOneMessage(chat[id]) AFTER awaiting
+        // MESSAGE_RECEIVED, so deleting here leaves chat[id] undefined and crashes ST.
+        pendingDelete = { id: messageId, label: '[trylater]' };
         return;
     }
 
@@ -776,7 +788,7 @@ async function maybeHandleUnpromptedMessage(messageId) {
         state.lastCheckedAt = Date.now();
         saveSettingsDebounced();
         updateStatus('Paused by [saynothing] until user replies.');
-        await robustDeleteMessage(messageId, '[saynothing]');
+        pendingDelete = { id: messageId, label: '[saynothing]' };
         return;
     }
 
@@ -1042,6 +1054,7 @@ jQuery(async () => {
         unpromptedInFlight = false;
         pendingNotification = null;
         tryLaterDetected = false;
+        pendingDelete = null;
     });
     eventSource.on(event_types.MESSAGE_RECEIVED, maybeHandleUnpromptedMessage);
     eventSource.on(event_types.MESSAGE_SENT, () => {
