@@ -171,6 +171,17 @@ function formatMessage(message) {
     return text ? `${name}: ${text}` : '';
 }
 
+// Wrap expanded message macros in a labeled divider so the injected conversation
+// log reads as a self-contained block rather than smooshing into the surrounding
+// prompt prose. Returns '' when there are no usable messages so callers can fall
+// back to a plain "(no messages)" note. Leading/trailing newlines keep the block
+// on its own lines even when the macro sits mid-sentence.
+function formatMessageBlock(messages, label) {
+    const body = messages.map(formatMessage).filter(Boolean).join('\n');
+    if (!body) return '';
+    return `\n--- ${label} ---\n${body}\n--- End ---\n`;
+}
+
 function getRecentMessagesByCount(chat, count) {
     const usable = chat.filter(msg => msg && !msg.is_system && cleanMessageText(msg.mes));
     return usable.slice(Math.max(0, usable.length - count));
@@ -344,13 +355,14 @@ async function expandCustomMacros(prompt) {
     expanded = await replaceAsync(expanded, /\[lastmessages=([^\]]+)\]/gi, async (_match, raw) => {
         const trimmed = raw.trim();
         if (/^\d+$/.test(trimmed)) {
-            const messages = getRecentMessagesByCount(chat, clampInteger(trimmed, 1, 1));
-            return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent messages)';
+            const n = clampInteger(trimmed, 1, 1);
+            const messages = getRecentMessagesByCount(chat, n);
+            return formatMessageBlock(messages, `Recent messages (last ${n})`) || '(no recent messages)';
         }
         const ms = durationToMs(trimmed);
         if (ms > 0) {
             const messages = await getAllRecentMessagesByAge(chat, ms);
-            return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${trimmed})`;
+            return formatMessageBlock(messages, `Recent messages (last ${trimmed})`) || `(no messages in the last ${trimmed})`;
         }
         return '(no recent messages)';
     });
@@ -358,20 +370,21 @@ async function expandCustomMacros(prompt) {
     expanded = await replaceAsync(expanded, /\[lastexchanges=([^\]]+)\]/gi, async (_match, raw) => {
         const trimmed = raw.trim();
         if (/^\d+$/.test(trimmed)) {
-            const messages = getRecentMessagesByExchangeCount(chat, clampInteger(trimmed, 1, 1));
-            return messages.map(formatMessage).filter(Boolean).join('\n') || '(no recent exchanges)';
+            const n = clampInteger(trimmed, 1, 1);
+            const messages = getRecentMessagesByExchangeCount(chat, n);
+            return formatMessageBlock(messages, `Recent exchanges (last ${n})`) || '(no recent exchanges)';
         }
         const ms = durationToMs(trimmed);
         if (ms > 0) {
             const messages = await getAllRecentMessagesByAge(chat, ms);
-            return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${trimmed})`;
+            return formatMessageBlock(messages, `Recent messages (last ${trimmed})`) || `(no messages in the last ${trimmed})`;
         }
         return '(no recent exchanges)';
     });
 
     expanded = await replaceAsync(expanded, /\[((?:\d+(?:\.\d+)?[mdhw])+)\]/gi, async (_match, durationRaw) => {
         const messages = await getAllRecentMessagesByAge(chat, durationToMs(durationRaw));
-        return messages.map(formatMessage).filter(Boolean).join('\n') || `(no messages in the last ${durationRaw})`;
+        return formatMessageBlock(messages, `Recent messages (last ${durationRaw})`) || `(no messages in the last ${durationRaw})`;
     });
 
     try {
