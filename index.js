@@ -11,7 +11,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const SAY_NOTHING_RE = /\[saynothing\]/i;
 const TRY_LATER_RE = /\[trylater\]/i;
-const SAY_NOTHING_INSTRUCTION = 'Continue the conversation naturally, but if it is not natural to say anything, or {{user}} says they will message later or asks you to wait for them to message first, output only [saynothing].';
+const SAY_NOTHING_INSTRUCTION = 'Send an unprompted message continuing the conversation naturally. If it is not natural to say anything right now, or {{user}} has said they will message later or asked you to wait for them to message first, then instead of sending a message output only the token [saynothing] — this discards the message and waits until {{user}} replies before checking again.';
 
 const DEFAULT_PROMPTS = [
     {
