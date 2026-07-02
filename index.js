@@ -1,6 +1,6 @@
 import { extension_settings, getContext } from '../../../extensions.js';
 import { eventSource, event_types } from '../../../events.js';
-import { Generate, deleteMessage, saveSettingsDebounced, substituteParams, getRequestHeaders, characters, getPastCharacterChats, setExtensionPrompt } from '../../../../script.js';
+import { Generate, deleteMessage, saveSettingsDebounced, substituteParams, getRequestHeaders, characters, getPastCharacterChats, setExtensionPrompt, extension_prompt_types } from '../../../../script.js';
 
 const EXT_NAME = 'unprompted';
 const DISPLAY_NAME = 'Unprompted Messages';
@@ -11,7 +11,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const SAY_NOTHING_RE = /\[saynothing\]/i;
 const TRY_LATER_RE = /\[trylater\]/i;
-const SAY_NOTHING_INSTRUCTION = 'Send an unprompted message continuing the conversation naturally. If it is not natural to say anything right now, or {{user}} has said they will message later or asked you to wait for them to message first, then instead of sending a message output only the token [saynothing] — this discards the message and waits until {{user}} replies before checking again.';
+const SAY_NOTHING_INSTRUCTION = 'Send an unprompted, independently-motivated message — do NOT respond to or reference what {{user}} last said. Reach out on your own terms, about something you want to bring up yourself. If there is nothing natural to say right now, or {{user}} has said they will message later or asked you to wait for them to message first, then instead of sending a message output only the token [saynothing] — this discards the message and waits until {{user}} replies before checking again.';
 
 const DEFAULT_PROMPTS = [
     {
@@ -61,12 +61,13 @@ const DEFAULT_SETTINGS = {
     resetTimerOnUserMessage: false,
     browserNotifications: false,
     browserNotificationsAll: false,
-    useSystemMessage: false,
     prompts: DEFAULT_PROMPTS,
+    scheduledPrompts: [],
     stateByChat: {},
 };
 
 let checkTimer = null;
+const scheduledTimers = new Map(); // promptId → timeoutId
 let timerStartedAt = 0;
 let timerScheduledMs = 0;
 let timerDisplayTick = null;
@@ -87,6 +88,9 @@ function loadSettings() {
     merged.prompts = Array.isArray(existing.prompts) && existing.prompts.length
         ? existing.prompts.map(normalizePrompt)
         : structuredClone(DEFAULT_PROMPTS);
+    merged.scheduledPrompts = Array.isArray(existing.scheduledPrompts)
+        ? existing.scheduledPrompts.map(normalizeScheduledPrompt)
+        : [];
     merged.stateByChat = existing.stateByChat && typeof existing.stateByChat === 'object'
         ? existing.stateByChat
         : {};
@@ -110,6 +114,17 @@ function normalizePrompt(prompt) {
         weight: positiveNumber(prompt.weight, 1),
         label: String(prompt.label || 'Unprompted prompt'),
         prompt: String(prompt.prompt || ''),
+    };
+}
+
+function normalizeScheduledPrompt(sp) {
+    return {
+        id: sp.id || crypto.randomUUID(),
+        enabled: sp.enabled !== false,
+        label: String(sp.label || 'Scheduled message'),
+        time: String(sp.time || '07:30'),
+        prompt: String(sp.prompt || ''),
+        lastFiredDate: String(sp.lastFiredDate || ''),
     };
 }
 
@@ -387,6 +402,23 @@ async function expandCustomMacros(prompt) {
         return formatMessageBlock(messages, `Recent messages (last ${durationRaw})`) || `(no messages in the last ${durationRaw})`;
     });
 
+    expanded = await replaceAsync(expanded, /\[read:([^\]]+)\]/gi, async (_match, filePath) => {
+        const trimmed = filePath.trim();
+        try {
+            const res = await fetch(`/api/plugins/filesystem/lorebooks/read?name=${encodeURIComponent(trimmed)}`);
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                console.warn(`[${EXT_NAME}] [read:${trimmed}] failed:`, body.error ?? res.status);
+                return `(could not read ${trimmed})`;
+            }
+            const data = await res.json();
+            return data.content ?? '';
+        } catch (err) {
+            console.warn(`[${EXT_NAME}] [read:${trimmed}] error:`, err);
+            return `(could not read ${trimmed})`;
+        }
+    });
+
     try {
         expanded = substituteParams(expanded);
     } catch (err) {
@@ -401,6 +433,26 @@ async function addSayNothingInstruction(prompt) {
     if (!trimmed || SAY_NOTHING_RE.test(trimmed) || TRY_LATER_RE.test(trimmed)) return trimmed;
     const appendix = await expandCustomMacros(SAY_NOTHING_INSTRUCTION);
     return `${trimmed}\n\n${appendix}`;
+}
+
+function addNoRepeatInstruction(prompt) {
+    const ctx = getContext();
+    const lastAi = [...(ctx.chat ?? [])].reverse().find(m => !m.is_user && !m.is_system);
+    if (!lastAi?.mes) return prompt;
+    const snippet = lastAi.mes.replace(/\n/g, ' ').slice(0, 200);
+    return `${prompt}\n\nYour last message was: "${snippet}". Do NOT repeat, rephrase, or echo it.`;
+}
+function getMoodInstruction() {
+    const moodSettings = extension_settings['mood'];
+    if (!moodSettings?.enabled || !Array.isArray(moodSettings.moods)) return '';
+    const instruction = moodSettings.instruction || '';
+    const moodList = moodSettings.moods.map(m => m.label).join(', ');
+    return '\n\n' + instruction.replace('{mood_list}', moodList);
+}
+
+function wrapWithContextBreak(prompt) {
+    const header = substituteParams('[UNPROMPTED MESSAGE — Ignore the conversation above entirely. Do NOT respond to, reference, or continue from anything {{user}} last said. You are initiating this message yourself, independent of anything previously said. The following is your brief — follow it to write your message, but do NOT output the brief itself:]');
+    return `${header}\n\n${prompt}${getMoodInstruction()}`;
 }
 
 function pickPrompt() {
@@ -471,7 +523,7 @@ async function trySendUnprompted(manual = false) {
         return false;
     }
 
-    const quietPrompt = await addSayNothingInstruction(await expandCustomMacros(selected.prompt));
+    const quietPrompt = addNoRepeatInstruction(await addSayNothingInstruction(await expandCustomMacros(selected.prompt)));
     if (!quietPrompt) {
         updateStatus('Selected prompt expanded to empty text.');
         if (manual) toastr.warning('Selected prompt expanded to empty text.', DISPLAY_NAME);
@@ -490,16 +542,8 @@ async function trySendUnprompted(manual = false) {
             chatKey: allowed.chatKey,
             startedAt: Date.now(),
         };
-        if (s.useSystemMessage) {
-            setExtensionPrompt(EXT_NAME, quietPrompt, 0, 0, false, 0);
-            await Generate('normal', { automatic_trigger: true });
-        } else {
-            await Generate('normal', {
-                automatic_trigger: true,
-                quiet_prompt: quietPrompt,
-                quietToLoud: true,
-            });
-        }
+        setExtensionPrompt(EXT_NAME, wrapWithContextBreak(quietPrompt), extension_prompt_types.IN_CHAT, 0, false, 0);
+        await Generate('normal', { automatic_trigger: true });
         // Execute any deletion that was deferred out of the MESSAGE_RECEIVED handler.
         // saveReply calls addOneMessage(chat[id]) after awaiting MESSAGE_RECEIVED, so
         // deleting during the event would leave chat[id] undefined and crash ST.
@@ -529,7 +573,7 @@ async function trySendUnprompted(manual = false) {
         return false;
     } finally {
         unpromptedInFlight = false;
-        setExtensionPrompt(EXT_NAME, '', 0, 0);
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.IN_CHAT, 0);
     }
 }
 
@@ -607,6 +651,121 @@ function stopTimer() {
 function restartTimer() {
     if (getSettings().enabled) startTimer();
     else stopTimer();
+    scheduleAllPrompts();
+}
+
+// ── Scheduled Prompts ─────────────────────────────────────────────────────────
+
+function todayString() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function msUntilNextFire(sp) {
+    const today = todayString();
+    const [h, m] = sp.time.split(':').map(Number);
+    const now = new Date();
+
+    const todayTarget = new Date(now);
+    todayTarget.setHours(h, m, 0, 0);
+
+    if (sp.lastFiredDate !== today && now >= todayTarget) {
+        // Overdue (e.g. PC was off at scheduled time) — fire after short init delay
+        return 10000;
+    }
+    if (sp.lastFiredDate === today) {
+        // Already fired today — schedule for tomorrow
+        const tomorrowTarget = new Date(todayTarget);
+        tomorrowTarget.setDate(tomorrowTarget.getDate() + 1);
+        return Math.max(1000, tomorrowTarget - now);
+    }
+    // Scheduled time is still coming up today
+    return Math.max(1000, todayTarget - now);
+}
+
+function scheduleOnePrompt(sp) {
+    const existing = scheduledTimers.get(sp.id);
+    if (existing) clearTimeout(existing);
+
+    if (!sp.enabled || !sp.time || !sp.prompt?.trim()) {
+        scheduledTimers.delete(sp.id);
+        return;
+    }
+
+    const delay = msUntilNextFire(sp);
+    const timerId = setTimeout(() => fireScheduledPrompt(sp), delay);
+    scheduledTimers.set(sp.id, timerId);
+}
+
+function scheduleAllPrompts() {
+    scheduledTimers.forEach(id => clearTimeout(id));
+    scheduledTimers.clear();
+
+    const s = getSettings();
+    if (!s.enabled) return;
+    for (const sp of (s.scheduledPrompts || [])) {
+        scheduleOnePrompt(sp);
+    }
+}
+
+async function fireScheduledPrompt(sp) {
+    scheduledTimers.delete(sp.id);
+
+    const today = todayString();
+    if (sp.lastFiredDate === today) {
+        scheduleOnePrompt(sp);
+        return;
+    }
+
+    const ctx = getContext();
+    if ((!ctx.chatId && !ctx.groupId) || !Array.isArray(ctx.chat) || !ctx.chat.length) {
+        console.warn(`[${EXT_NAME}] Scheduled prompt "${sp.label}" skipped: no active chat`);
+        scheduleOnePrompt(sp);
+        return;
+    }
+
+    if (unpromptedInFlight) {
+        console.warn(`[${EXT_NAME}] Scheduled prompt "${sp.label}" skipped: generation in flight`);
+        scheduleOnePrompt(sp);
+        return;
+    }
+
+    sp.lastFiredDate = today;
+    saveSettingsDebounced();
+
+    const expandedPrompt = await expandCustomMacros(sp.prompt);
+    if (!expandedPrompt) {
+        scheduleOnePrompt(sp);
+        return;
+    }
+
+    const chatKey = getChatKey(ctx);
+    unpromptedInFlight = true;
+    tryLaterDetected = false;
+
+    try {
+        pendingNotification = { chatKey, startedAt: Date.now() };
+        setExtensionPrompt(EXT_NAME, wrapWithContextBreak(expandedPrompt), extension_prompt_types.IN_CHAT, 0, false, 0);
+        await Generate('normal', { automatic_trigger: true });
+        if (pendingDelete) {
+            const { id, label } = pendingDelete;
+            pendingDelete = null;
+            await robustDeleteMessage(id, label);
+        }
+        if (!tryLaterDetected && !getChatState(chatKey).silentUntilUserMessage) {
+            getChatState(chatKey).lastSentAt = Date.now();
+            saveSettingsDebounced();
+            updateStatus(`Last sent: ${sp.label} (scheduled)`);
+        }
+    } catch (err) {
+        pendingNotification = null;
+        pendingDelete = null;
+        console.error(`[${EXT_NAME}] Scheduled prompt "${sp.label}" failed`, err);
+    } finally {
+        unpromptedInFlight = false;
+        setExtensionPrompt(EXT_NAME, '', extension_prompt_types.IN_CHAT, 0);
+    }
+
+    scheduleOnePrompt(sp);
 }
 
 function escHtml(value) {
@@ -861,6 +1020,40 @@ function renderPromptList() {
     updatePromptChances();
 }
 
+function renderScheduledRow(sp) {
+    return `
+<div class="unprompted-prompt" data-id="${escHtml(sp.id)}">
+    <div class="unprompted-prompt-head">
+        <label class="checkbox_label unprompted-enabled">
+            <input class="unprompted-sched-enabled" type="checkbox" ${sp.enabled ? 'checked' : ''}>
+            <span>Enabled</span>
+        </label>
+        <input class="text_pole unprompted-sched-label" type="text" value="${escHtml(sp.label)}" placeholder="Label" title="Label">
+        <input class="text_pole unprompted-sched-time" type="time" value="${escHtml(sp.time)}" title="Fire time (your local time)">
+        <button class="menu_button menu_button_icon unprompted-sched-delete" title="Delete">
+            <span aria-hidden="true">🗑️</span>
+        </button>
+    </div>
+    <textarea class="text_pole unprompted-prompt-text" rows="3" spellcheck="false">${escHtml(sp.prompt)}</textarea>
+</div>`;
+}
+
+function renderScheduledList() {
+    const list = document.getElementById('unprompted_scheduled_list');
+    if (!list) return;
+    list.innerHTML = (getSettings().scheduledPrompts || []).map(renderScheduledRow).join('');
+}
+
+function writeScheduledFromRow(row) {
+    const id = row.dataset.id;
+    const sp = (getSettings().scheduledPrompts || []).find(item => item.id === id);
+    if (!sp) return;
+    sp.enabled = !!row.querySelector('.unprompted-sched-enabled')?.checked;
+    sp.label = row.querySelector('.unprompted-sched-label')?.value || 'Scheduled message';
+    sp.time = row.querySelector('.unprompted-sched-time')?.value || '07:30';
+    sp.prompt = row.querySelector('.unprompted-prompt-text')?.value || '';
+}
+
 function writePromptFromRow(row) {
     const id = row.dataset.id;
     const prompt = getSettings().prompts.find(item => item.id === id);
@@ -930,12 +1123,6 @@ function addSettingsUI() {
                 <input id="unprompted_browser_notifications_all" type="checkbox" ${s.browserNotificationsAll ? 'checked' : ''}>
                 <span>Also notify on regular AI messages when page is unfocused</span>
             </label>
-            <label class="checkbox_label unprompted-row">
-                <input id="unprompted_use_system_message" type="checkbox" ${s.useSystemMessage ? 'checked' : ''}>
-                <span>Send as system message</span>
-            </label>
-            <div class="unprompted-note">When enabled, the unprompted prompt is injected as a system message (role 0) instead of a user turn. It does not appear in past-messages macros and is not visible in chat history.</div>
-
             <div class="unprompted-actions">
                 <button id="unprompted_test" class="menu_button menu_button_icon" title="Try to send one now">
                     <i class="fa-solid fa-paper-plane"></i>
@@ -950,6 +1137,17 @@ function addSettingsUI() {
             <div id="unprompted_status" class="unprompted-status"></div>
             <div class="unprompted-macro-note"><a href="https://github.com/shikaku2/st-unprompted#custom-macros" target="_blank" rel="noopener noreferrer">more instructions and macro definitions</a>. Context macros: [lastmessages=1], [lastexchanges=1], [1d], [1w], [168h], [1m], combined forms like [1m2d6h]. Duration aliases work too: [lastmessages=1w], [lastexchanges=7d]. Duration macros also pull in messages from other recent chat files with this character. AI output macros: [saynothing] (skip, pause until user replies), [trylater] (skip, retry next check).</div>
             <div id="unprompted_prompt_list" class="unprompted-prompt-list"></div>
+
+            <hr class="sysHR">
+            <div class="unprompted-actions">
+                <span style="font-weight:bold">Scheduled messages</span>
+                <button id="unprompted_add_scheduled" class="menu_button menu_button_icon" title="Add a message that fires at a set time each day">
+                    <i class="fa-solid fa-clock"></i>
+                    <span>Add scheduled</span>
+                </button>
+            </div>
+            <div class="unprompted-note">Each fires once per day at the set local time. If the PC was off at the scheduled time, it fires shortly after startup instead.</div>
+            <div id="unprompted_scheduled_list" class="unprompted-prompt-list"></div>
         </div>
     </div>
 </div>`;
@@ -1026,10 +1224,6 @@ function addSettingsUI() {
         const n = new Notification(`${charName}: Testing Browser Notifications.`, opts);
         n.onclick = () => { window.focus(); n.close(); };
     });
-    $('#unprompted_use_system_message').on('change', function () {
-        getSettings().useSystemMessage = !!this.checked;
-        saveSettingsDebounced();
-    });
     $('#unprompted_test').on('click', () => trySendUnprompted(true));
     $('#unprompted_add_prompt').on('click', () => {
         getSettings().prompts.push(normalizePrompt({
@@ -1056,12 +1250,42 @@ function addSettingsUI() {
         saveSettingsDebounced();
     });
 
+    $('#unprompted_add_scheduled').on('click', () => {
+        const s = getSettings();
+        if (!s.scheduledPrompts) s.scheduledPrompts = [];
+        s.scheduledPrompts.push(normalizeScheduledPrompt({ label: 'Good morning', time: '07:30', prompt: '' }));
+        renderScheduledList();
+        saveSettingsDebounced();
+        scheduleAllPrompts();
+    });
+
+    $('#unprompted_scheduled_list').on('change input', '.unprompted-prompt input, .unprompted-prompt textarea', function () {
+        const row = this.closest('.unprompted-prompt');
+        if (!row) return;
+        writeScheduledFromRow(row);
+        saveSettingsDebounced();
+        scheduleAllPrompts();
+    });
+
+    $('#unprompted_scheduled_list').on('click', '.unprompted-sched-delete', function () {
+        const row = this.closest('.unprompted-prompt');
+        if (!row) return;
+        const id = row.dataset.id;
+        getSettings().scheduledPrompts = (getSettings().scheduledPrompts || []).filter(sp => sp.id !== id);
+        const timerId = scheduledTimers.get(id);
+        if (timerId) { clearTimeout(timerId); scheduledTimers.delete(id); }
+        renderScheduledList();
+        saveSettingsDebounced();
+    });
+
     syncNotificationUI();
 }
 
 jQuery(async () => {
     loadSettings();
     addSettingsUI();
+    renderScheduledList();
+    scheduleAllPrompts();
 
     eventSource.on(event_types.GENERATION_STOPPED, () => {
         unpromptedInFlight = false;
